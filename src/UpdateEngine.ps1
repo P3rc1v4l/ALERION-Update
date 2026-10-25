@@ -273,8 +273,9 @@ try {
         $total = $selected.Count
         if ($config.RestorePoint) { Step 'restore' 20 'Creating system restore point'; Add-Result (New-RestorePoint) }
 
-        $wuSel = Select-BySource 'windows'
-        $gpuSel = Select-BySource 'gpu'
+        # @() matters: PS 5.1 gives a single [pscustomobject] no .Count, so one selected item would be skipped.
+        $wuSel = @(Select-BySource 'windows')
+        $gpuSel = @(Select-BySource 'gpu')
         $wuIds = @($wuSel | ForEach-Object { $_.Key.Substring('windows|'.Length) })
         if ($config.Parallel -and $wuSel.Count) {
             Start-ProviderJob -Name 'wu-dl' -Script { param($d, $m, $n, $x, $ids) Save-WindowsUpdates -IncludeDrivers $d -UseMicrosoftUpdate $m -SkipNvidiaDisplay $n -SkipDefinitions $x -OnlyIds $ids } -Arguments ($wuArgs + , $wuIds)

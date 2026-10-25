@@ -122,6 +122,8 @@ $script:WingetCodes = @{
     -1978334967   = 'REBOOT'          # 0x8A150109 install finished, reboot required
     -1978334966   = 'REBOOT_TO_INSTALL' # 0x8A15010A reboot required before install
     -1978335189   = 'NOT_APPLICABLE'  # 0x8A15002B no applicable upgrade
+    -1978335090   = 'TECH_MISMATCH'   # 0x8A15008E upgrade uses a different installer technology
+    -1978334959   = 'IN_USE'          # 0x8A150111 package in use by another application
     -1978335212   = 'NOT_FOUND'       # 0x8A150014 no package found
     -1978334975   = 'IN_USE'          # 0x8A150101 application in use
     -1978334973   = 'IN_PROGRESS'     # 0x8A150103 another installation in progress
@@ -238,6 +240,7 @@ function Invoke-WingetPackageUpgrade {
         'OK'                { return New-UpdateResult @base -Status Updated }
         'REBOOT'            { return New-UpdateResult @base -Status Updated -RebootRequired $true }
         'NOT_APPLICABLE'    { return New-UpdateResult @base -Status Skipped -Message 'msg.noApplicableUpdate' }
+        'TECH_MISMATCH'     { return New-UpdateResult @base -Status Skipped -Message 'msg.techMismatch' }
         'REBOOT_TO_INSTALL' { return New-UpdateResult @base -Status Skipped -Message 'msg.rebootFirst' -RebootRequired $true }
         'IN_USE'            { return New-UpdateResult @base -Status Failed -Message 'msg.appInUse' }
         'TIMEOUT'           { return New-UpdateResult @base -Status Failed -Message 'msg.timeout' }
@@ -370,7 +373,8 @@ function Select-WUUpdates {
 function Save-WindowsUpdates {
     <# Downloads the selected updates (runs in a background job). Returns update IDs. #>
     param([bool]$IncludeDrivers, [bool]$UseMicrosoftUpdate, [bool]$SkipNvidiaDisplay, [bool]$SkipDefinitions, [string[]]$OnlyIds)
-    $updates = Select-WUUpdates -Updates @(Find-WindowsUpdates -IncludeDrivers $IncludeDrivers -UseMicrosoftUpdate $UseMicrosoftUpdate -SkipNvidiaDisplay $SkipNvidiaDisplay -SkipDefinitions $SkipDefinitions) -OnlyIds $OnlyIds
+    # @() matters: a single COM update would otherwise come back as a scalar without .Count
+    $updates = @(Select-WUUpdates -Updates @(Find-WindowsUpdates -IncludeDrivers $IncludeDrivers -UseMicrosoftUpdate $UseMicrosoftUpdate -SkipNvidiaDisplay $SkipNvidiaDisplay -SkipDefinitions $SkipDefinitions) -OnlyIds $OnlyIds)
     if ($updates.Count -eq 0) { return @() }
     $session = New-Object -ComObject Microsoft.Update.Session
     $coll = New-Object -ComObject Microsoft.Update.UpdateColl
@@ -389,7 +393,8 @@ function Save-WindowsUpdates {
 function Install-WindowsUpdates {
     param([bool]$IncludeDrivers, [bool]$UseMicrosoftUpdate, [bool]$SkipNvidiaDisplay, [bool]$SkipDefinitions, [string[]]$OnlyIds)
     $results = New-Object System.Collections.Generic.List[object]
-    $updates = Select-WUUpdates -Updates @(Find-WindowsUpdates -IncludeDrivers $IncludeDrivers -UseMicrosoftUpdate $UseMicrosoftUpdate -SkipNvidiaDisplay $SkipNvidiaDisplay -SkipDefinitions $SkipDefinitions) -OnlyIds $OnlyIds
+    # @() matters: a single COM update would otherwise come back as a scalar without .Count
+    $updates = @(Select-WUUpdates -Updates @(Find-WindowsUpdates -IncludeDrivers $IncludeDrivers -UseMicrosoftUpdate $UseMicrosoftUpdate -SkipNvidiaDisplay $SkipNvidiaDisplay -SkipDefinitions $SkipDefinitions) -OnlyIds $OnlyIds)
     if ($updates.Count -eq 0) { return $results.ToArray() }
     $session = New-Object -ComObject Microsoft.Update.Session
     $session.ClientApplicationID = 'Update Center'

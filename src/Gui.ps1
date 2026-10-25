@@ -13,6 +13,7 @@
 param(
     [switch]$Monitor,
     [string]$Snapshot,
+    [string]$UiTest,
     [switch]$Preview,
     [ValidateSet('Overview', 'Updates', 'History', 'Settings')][string]$Page = 'Overview',
     [string]$Query,
@@ -43,7 +44,7 @@ Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Report.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Scheduler.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Providers.psm1') -DisableNameChecking -Force
-$devMode = [bool]($Snapshot -or $Preview)
+$devMode = [bool]($Snapshot -or $Preview -or $UiTest)
 
 # ------------------------------------------------------------------ elevation
 if (-not (Test-IsAdmin) -and -not $devMode) {
@@ -855,7 +856,7 @@ foreach ($c in 'ChkWake', 'ChkParallel', 'ChkRestore', 'ChkSelf', 'ChkAutostart'
 foreach ($c in 'RbActInstall', 'RbActNotify', 'RbVisible', 'RbSilent') { $ui[$c].Add_Checked({ Register-Change }) }
 foreach ($c in 'TxtTime', 'TxtRepo', 'TxtRebootTime') { $ui[$c].Add_TextChanged({ Register-Change }) }
 $ui.BtnSave.Add_Click({ [void](Save-Settings) })
-$ui.BtnDiscard.Add_Click({ $script:config = Get-Config; Show-Config; Show-AppToast (T 'set.discarded') 'info' })
+$ui.BtnDiscard.Add_Click({ Show-Config; Show-AppToast (T 'set.discarded') 'info' })   # back to the last saved state
 $ui.BtnTestToast.Add_Click({ Show-Toast -Title (T 'toast.testTitle') -Body (T 'toast.testBody'); Show-AppToast (T 'set.testSent') 'info' })
 $ui.BtnCheckAppUpdate.Add_Click({ Find-AppUpdate })
 Add-TimePicker $ui.TxtTime
@@ -876,6 +877,55 @@ $window.Add_Closed({ $timer.Stop(); try { $guiMutex.ReleaseMutex() } catch { } }
 function Invoke-DevDialog {
     if ($Dialog -eq 'Restart') { Show-RestartDialog $null }
     elseif ($Dialog -eq 'Info') { Show-Dialog -Title (T 'ov.alreadyRunning') -Glyph ([string][char]0xE895) -Buttons @(@{ Text = 'OK'; Kind = 'Secondary' }) }
+}
+
+function Invoke-UiTest {
+    <# Drives the real window off-screen and writes PASS/FAIL lines to $UiTest (dev aid, no admin). #>
+    $window.WindowStartupLocation = 'Manual'; $window.Left = -4000; $window.Top = 0; $window.ShowInTaskbar = $false
+    $window.Add_ContentRendered({
+        $res = New-Object System.Collections.Generic.List[string]
+        function Check([string]$Name, [bool]$Ok) { $res.Add($(if ($Ok) { "PASS  $Name" } else { "FAIL  $Name" })) }
+        $pump = { $f = New-Object System.Windows.Threading.DispatcherFrame
+                  [void]$window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [Action]{ $f.Continue = $false })
+                  [System.Windows.Threading.Dispatcher]::PushFrame($f) }
+        $click = { param($el) $el.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        try {
+            $ui.NavSettings.IsChecked = $true; & $pump
+            Check 'settings page visible' ($ui.PageSettings.Visibility -eq 'Visible')
+            Check 'starts clean (save disabled)' (-not $ui.BtnSave.IsEnabled)
+            Select-ComboTag $ui.CmbReboot 'Scheduled'; & $pump
+            Check 'change marks dirty' ($script:dirty -and $ui.BtnSave.IsEnabled)
+            Check 'reboot time row appears' ($ui.PnlRebootTime.Visibility -eq 'Visible')
+            [void]$ui.TxtTime.Focus(); & $pump
+            $state = $ui.TxtTime.Tag
+            Check 'time box selects all on focus' ($ui.TxtTime.SelectionLength -eq $ui.TxtTime.Text.Length -and $ui.TxtTime.Text.Length -gt 0)
+            Check 'time picker opens' ([bool]$state.Pop.IsOpen)
+            Check 'picker preselects current time' ([string]$state.Hours.SelectedItem -eq $ui.TxtTime.Text.Substring(0, 2))
+            $state.Hours.SelectedIndex = 7; $state.Mins.SelectedIndex = 45; & $pump
+            Check 'picking 07:45 updates text' ($ui.TxtTime.Text -eq '07:45')
+            $ui.TxtTime.Text = '21:30'; & $pump
+            Check 'typing syncs picker' ([string]$state.Hours.SelectedItem -eq '21' -and [string]$state.Mins.SelectedItem -eq '30')
+            $state.Pop.IsOpen = $false
+            & $click $ui.BtnSave; & $pump
+            Check 'save clears dirty' (-not $script:dirty)
+            Check 'saved values kept' ($script:config.Schedule.Time -eq '21:30' -and $script:config.Reboot -eq 'Scheduled')
+            Check 'toast shown' ($ui.ToastText.Text -eq (T 'set.saved'))
+            $ui.ChkAutostart.IsChecked = $true; & $click $ui.ChkAutostart; & $pump
+            Check 'toggle marks dirty' ($script:dirty)
+            $ui.NavOverview.IsChecked = $true; & $pump
+            Check 'leaving settings saves' (-not $script:dirty -and [bool]$script:config.StartWithWindows)
+            Check 'overview visible after leaving' ($ui.PageOverview.Visibility -eq 'Visible')
+            $ui.NavSettings.IsChecked = $true; Select-ComboTag $ui.CmbReboot 'Never'; & $pump
+            & $click $ui.BtnDiscard; & $pump
+            Check 'discard restores value' ([string]$ui.CmbReboot.SelectedItem.Tag -eq 'Scheduled' -and -not $script:dirty)
+            Check 'test notification button labelled' ([string]$ui.BtnTestToast.Content -eq (T 'set.testToast'))
+            Check 'app version shown' ($ui.LblAppVersion.Text -like "*$version*")
+            Check 'eye button style applied' ($null -ne $window.FindResource('EyeButton'))
+        } catch { $res.Add("FAIL  exception: $($_.Exception.Message)") }
+        [IO.File]::WriteAllLines($UiTest, $res)
+        $window.Close()
+    })
+    [void]$window.ShowDialog()
 }
 
 function Invoke-Snapshot {
@@ -906,6 +956,7 @@ Show-Config
 Import-Scan
 Show-Summary
 if ($Snapshot) { Invoke-Snapshot; return }
+if ($UiTest) { Invoke-UiTest; return }
 if ($Preview) {
     if ($X -ge 0) { $window.WindowStartupLocation = 'Manual'; $window.Left = $X; $window.Top = $Y }
     $window.Add_ContentRendered({ Show-Page $Page; if ($Page -eq 'History') { Show-History }; if ($Query) { $ui.TxtSearch.Text = $Query }; Invoke-DevDialog })

@@ -11,6 +11,11 @@ Alle relevanten Änderungen an Update Center (bis v1.2.0 „ALERION Update“). 
 - **Neustart-Hinweis trotz frischem Neustart:** `PendingFileRenameOperations` (z. B. dauerhaft von Xbox Gaming
   Services belegt) wird nicht mehr ausgewertet; zusätzlich zählt der eigene letzte Lauf nur, wenn seitdem kein
   Neustart war. winget-Ausgaben mit dem Wort „restart“ lösen keinen Neustart-Hinweis mehr aus.
+- **Einzelnes Windows-Update / einzelner Grafiktreiber wurde übersprungen bzw. scheiterte** („Eigenschaft Count nicht
+  gefunden“): PS 5.1 liefert bei genau einem Element ein Einzelobjekt – jetzt immer als Liste behandelt.
+- winget-Codes `0x8A15008E` (andere Installationsart) und `0x8A150111` (Programm in Benutzung) werden verständlich
+  angezeigt statt als Fehlercode.
+- „Verwerfen“ in den Einstellungen springt auf den zuletzt gespeicherten Stand zurück.
 
 ### Changed
 - **Neuer Name „Update Center“** (Fenster, Verknüpfungen, Startmenü, „Installierte Apps“, Aufgaben, Benachrichtigungen,
@@ -29,6 +34,8 @@ Alle relevanten Änderungen an Update Center (bis v1.2.0 „ALERION Update“). 
 - **Testbenachrichtigung senden** und **Nach App-Update suchen** in den Einstellungen.
 - **Weitergabe:** `UpdateCenter-Setup-vX.Y.Z.exe` (Doppelklick) und Online-Installer `get.ps1`.
 - **Sicherheit:** wöchentlicher GitHub-Workflow (Sicherheitsregeln, Secret-Scan, Smoke-Test), `SECURITY.md`.
+- **Automatischer UI-Test** (`tests/ui_test.ps1`): bedient das echte Fenster unsichtbar (Speichern-Leiste, Zeitwähler,
+  Verwerfen, Toast) – 19 Prüfungen.
 
 ## [1.2.0] - 2026-10-25
 ### Added
