@@ -1,0 +1,48 @@
+name: Security check
+
+# Runs every Monday and on every push/PR: static analysis with security rules, secret scan
+# and the smoke test. A red run here means: look before the next release.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: PSScriptAnalyzer (security rules)
+        shell: powershell
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $rules = 'PSAvoidUsingInvokeExpression','PSAvoidUsingPlainTextForPassword','PSAvoidUsingConvertToSecureStringWithPlainText',
+                   'PSAvoidUsingUsernameAndPasswordParams','PSAvoidUsingComputerNameHardcoded','PSUsePSCredentialType'
+          $issues = Invoke-ScriptAnalyzer -Path . -Recurse -IncludeRule $rules -Severity Warning,Error
+          $issues | Format-Table RuleName, ScriptName, Line, Message -AutoSize
+          if ($issues) { throw "Security rules found $($issues.Count) issue(s)" }
+
+      - name: Smoke test
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\smoke_test.ps1
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,16 +1,18 @@
-# ALERION Update - Task Scheduler integration.
-# Two tasks under \ALERION\:
-#   "ALERION Update"      - the schedule (absent when Schedule.Type = Manual)
-#   "ALERION Update GUI"  - on-demand only; the desktop shortcut starts it so the app opens
-#                           elevated without a UAC prompt.
+# Update Center - Task Scheduler integration. Tasks under \UpdateCenter\:
+#   "Update Center"           - the schedule (absent when Schedule.Type = Manual)
+#   "Update Center GUI"       - on-demand only; the desktop shortcut starts it so the app opens
+#                               elevated without a UAC prompt
+#   "Update Center Autostart" - optional, opens the app minimized at sign-in
+#   "Update Center Restart"   - optional one-time restart
 # Keep this file ASCII-only (Windows PowerShell 5.1).
 
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'Common.psm1') -DisableNameChecking
 
-$script:TaskPath     = '\ALERION\'
-$script:TaskSchedule = 'ALERION Update'
-$script:TaskGui      = 'ALERION Update GUI'
+$script:TaskPath      = (Get-Product).TaskPath
+$script:TaskSchedule  = 'Update Center'
+$script:TaskGui       = 'Update Center GUI'
+$script:TaskAutostart = 'Update Center Autostart'
 
 function Get-TaskNames { [pscustomobject]@{ Path = $script:TaskPath; Schedule = $script:TaskSchedule; Gui = $script:TaskGui } }
 
@@ -52,7 +54,7 @@ function New-TaskXml {
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Author>ALERION Studios</Author>
+    <Author>Update Center</Author>
     <Description>$(ConvertTo-XmlText $Description)</Description>
   </RegistrationInfo>
   $triggers
@@ -104,7 +106,7 @@ function Get-GuiArguments {
 
 function Register-GuiTask {
     param([string]$AppRoot = (Get-AppPaths).AppRoot)
-    $xml = New-TaskXml -Description 'Opens ALERION Update elevated (started by the desktop shortcut).' -Arguments (Get-GuiArguments -AppRoot $AppRoot) -InstancePolicy Parallel -TimeLimit 'PT0S'
+    $xml = New-TaskXml -Description 'Opens Update Center elevated (started by the desktop shortcut).' -Arguments (Get-GuiArguments -AppRoot $AppRoot) -InstancePolicy Parallel -TimeLimit 'PT0S'
     Register-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskGui -Xml $xml -Force | Out-Null
 }
 
@@ -115,23 +117,23 @@ function Register-ScheduleTask {
         Unregister-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskSchedule -Confirm:$false -ErrorAction SilentlyContinue
         return
     }
-    $xml = New-TaskXml -Description 'Keeps apps, drivers and Windows up to date (ALERION Update).' `
+    $xml = New-TaskXml -Description 'Keeps apps, drivers and Windows up to date (Update Center).' `
         -Arguments (Get-EngineArguments -AppRoot $AppRoot) -TriggerXml (New-TriggerXml -Schedule $Config.Schedule) -WakeToRun ([bool]$Config.Schedule.WakeToRun)
     Register-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskSchedule -Xml $xml -Force | Out-Null
 }
 
-$script:TaskRestart = 'ALERION Restart'
+$script:TaskRestart = 'Update Center Restart'
 
 function Register-RestartTask {
     <# One-time restart at the given time. Runs as SYSTEM (works while locked), warns 2 minutes ahead
        (cancel: shutdown /a), is NOT caught up when the PC was off and deletes itself afterwards. #>
-    param([Parameter(Mandatory)][datetime]$At, [string]$Message = 'ALERION Update: restart to finish updates')
+    param([Parameter(Mandatory)][datetime]$At, [string]$Message = 'Update Center: restart to finish updates')
     $fmt = 'yyyy-MM-ddTHH:mm:ss'
     $shutdown = Join-Path $env:WINDIR 'System32\shutdown.exe'
     $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Author>ALERION Studios</Author><Description>One-time restart planned by ALERION Update.</Description></RegistrationInfo>
+  <RegistrationInfo><Author>Update Center</Author><Description>One-time restart planned by Update Center.</Description></RegistrationInfo>
   <Triggers><TimeTrigger><StartBoundary>$($At.ToString($fmt))</StartBoundary><EndBoundary>$($At.AddHours(1).ToString($fmt))</EndBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
   <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
   <Settings>
@@ -167,9 +169,34 @@ function Unregister-RestartTask {
 
 function Invoke-RestartNow {
     <# Short countdown so open documents can still be saved; cancel with shutdown /a. #>
-    param([int]$Seconds = 15, [string]$Message = 'ALERION Update')
+    param([int]$Seconds = 15, [string]$Message = 'Update Center')
     Unregister-RestartTask
     & (Join-Path $env:WINDIR 'System32\shutdown.exe') /r /t $Seconds /c $Message
+}
+
+function Register-AutostartTask {
+    <# Opens the app minimized at sign-in of the current user (elevated, no UAC prompt). #>
+    param([string]$AppRoot = (Get-AppPaths).AppRoot)
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $trigger = "<LogonTrigger><Enabled>true</Enabled><UserId>$(ConvertTo-XmlText $sid)</UserId><Delay>PT20S</Delay></LogonTrigger>"
+    $xml = New-TaskXml -Description 'Starts Update Center minimized at sign-in.' -Arguments ((Get-GuiArguments -AppRoot $AppRoot) + ' -Minimized') `
+        -TriggerXml $trigger -InstancePolicy IgnoreNew -TimeLimit 'PT0S'
+    # A logon trigger must not depend on the network being up.
+    $xml = $xml.Replace('<RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>', '<RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>')
+    Register-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskAutostart -Xml $xml -Force | Out-Null
+}
+
+function Set-Autostart {
+    param([Parameter(Mandatory)][bool]$Enabled, [string]$AppRoot = (Get-AppPaths).AppRoot)
+    if ($Enabled) { Register-AutostartTask -AppRoot $AppRoot }
+    else { Unregister-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskAutostart -Confirm:$false -ErrorAction SilentlyContinue }
+}
+
+function Remove-LegacyTasks {
+    <# v1.x ("ALERION Update") task folder. #>
+    $legacy = (Get-Product).LegacyTaskPath
+    Get-ScheduledTask -TaskPath $legacy -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like 'ALERION*' } |
+        ForEach-Object { Unregister-ScheduledTask -TaskPath $legacy -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue }
 }
 
 function Get-NextRun {
@@ -185,7 +212,7 @@ function Test-GuiTask {
 }
 
 function Unregister-AllTasks {
-    foreach ($n in @($script:TaskSchedule, $script:TaskGui, 'ALERION Restart')) {
+    foreach ($n in @($script:TaskSchedule, $script:TaskGui, $script:TaskRestart, $script:TaskAutostart)) {
         Unregister-ScheduledTask -TaskPath $script:TaskPath -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue
     }
 }

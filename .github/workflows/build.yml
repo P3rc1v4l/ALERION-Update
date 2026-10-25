@@ -33,24 +33,21 @@ jobs:
           $issues | Format-Table -AutoSize
           if ($issues) { throw "PSScriptAnalyzer found $($issues.Count) error(s)" }
 
-      - name: Package
+      - name: Package (ZIP + SHA-256 + Setup.exe)
         if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'
         id: pkg
         shell: powershell
         run: |
           $version = (Get-Content VERSION -Raw).Trim()
-          $name = "ALERION-Update-v$version"
-          $stage = Join-Path $env:RUNNER_TEMP $name
-          New-Item -ItemType Directory $stage | Out-Null
-          $items = 'src','assets','tools','tests','.github','VERSION','LICENSE','README.md','CHANGELOG.md','ROADMAP.md','ROADMAP_PUBLIC.md',
-                   'PROJECT_DOCUMENTATION.md','PROMPT_OPTIMIERT.md','Install.ps1','Install.cmd','Uninstall.ps1','.gitignore'
-          foreach ($i in $items) { if (Test-Path $i) { Copy-Item $i -Destination $stage -Recurse } }
-          $zip = "$name.zip"
-          Compress-Archive -Path "$stage\*" -DestinationPath $zip
-          # The .sha256 file is required by the in-app self-update.
+          $zip = "UpdateCenter-v$version.zip"
+          git archive --format=zip -o $zip HEAD
           (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip" | Out-File "$zip.sha256" -Encoding ascii
+          # Same package under the v1.x name so "ALERION Update" installations can self-update.
+          $legacy = "ALERION-Update-v$version.zip"
+          Copy-Item $zip $legacy
+          (Get-FileHash $legacy -Algorithm SHA256).Hash.ToLower() + "  $legacy" | Out-File "$legacy.sha256" -Encoding ascii
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\build-setup.ps1 -Zip (Resolve-Path $zip)
           "version=$version" >> $env:GITHUB_OUTPUT
-          "zip=$zip" >> $env:GITHUB_OUTPUT
 
       - name: Publish GitHub release
         if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'
@@ -58,7 +55,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $v = "v${{ steps.pkg.outputs.version }}"
+          $v = "${{ steps.pkg.outputs.version }}"
           $flags = @()
           if ('${{ inputs.build_type }}' -eq 'draft') { $flags += '--draft' }
-          gh release create $v "${{ steps.pkg.outputs.zip }}" "${{ steps.pkg.outputs.zip }}.sha256" --title "ALERION Update $v" --notes-file CHANGELOG.md @flags
+          gh release create "v$v" "UpdateCenter-v$v.zip" "UpdateCenter-v$v.zip.sha256" "UpdateCenter-Setup-v$v.exe" `
+            "ALERION-Update-v$v.zip" "ALERION-Update-v$v.zip.sha256" --title "Update Center v$v" --notes-file CHANGELOG.md @flags

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    ALERION Update engine. Collects update candidates from all sources (with priority), then
+    Update Center engine. Collects update candidates from all sources (with priority), then
     installs either everything, a selection, or the priorities configured for scheduled runs.
 .PARAMETER Scan
     Only collect candidates (+ installed programs for the GUI search) into state\last-scan.json.
@@ -23,7 +23,9 @@ param(
     [switch]$Scan,
     [string]$Selection,
     [switch]$Silent,
-    [switch]$FromGui
+    [switch]$FromGui,
+    # Only update Update Center itself (Settings > Check for updates).
+    [switch]$SelfUpdateOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,13 +41,13 @@ Import-Module (Join-Path $src 'Providers.psm1') -DisableNameChecking -Force
 
 $scanOnly = [bool]($Scan -or $DryRun)
 if (-not (Test-IsAdmin) -and -not $scanOnly) {
-    Write-Error 'ALERION Update must run elevated (use the desktop shortcut or the scheduled task).'
+    Write-Error 'Update Center must run elevated (use the desktop shortcut or the scheduled task).'
     exit 5
 }
 
 # ------------------------------------------------------------------ single instance
-$mutex = New-Object System.Threading.Mutex($false, 'Global\ALERION-Update-Run')
-if (-not $mutex.WaitOne(0)) { Write-Warning 'Another ALERION Update run is active.'; exit 3 }
+$mutex = New-Object System.Threading.Mutex($false, 'Global\UpdateCenter-Run')
+if (-not $mutex.WaitOne(0)) { Write-Warning 'Another Update Center run is active.'; exit 3 }
 
 $results = New-Object System.Collections.Generic.List[object]
 $candidates = New-Object System.Collections.Generic.List[object]
@@ -90,7 +92,7 @@ function Start-ProviderJob {
         Import-Module (Join-Path $srcDir 'Providers.psm1') -DisableNameChecking
         & ([scriptblock]::Create($inner)) @innerArgs
     }
-    $script:jobs[$Name] = Start-Job -Name "alerion-$Name" -ScriptBlock $wrapper -ArgumentList $src, $Script.ToString(), $Arguments
+    $script:jobs[$Name] = Start-Job -Name "uc-$Name" -ScriptBlock $wrapper -ArgumentList $src, $Script.ToString(), $Arguments
     Write-Log -Message "Background job started: $Name"
 }
 
@@ -144,7 +146,7 @@ try {
     Clear-Cancel
     Reset-Status -Mode $(if ($scanOnly) { 'scan' } else { 'install' })
     $version = Get-AppVersion
-    Step 'start' 1 "ALERION Update v$version started (scheduled=$Scheduled, scan=$scanOnly, selection=$([bool]$Selection), mode=$mode, parallel=$($config.Parallel))"
+    Step 'start' 1 "Update Center v$version started (scheduled=$Scheduled, scan=$scanOnly, selection=$([bool]$Selection), mode=$mode, parallel=$($config.Parallel))"
 
     # -------------------------------------------------------------- scheduled-run guards
     if ($Scheduled) {
@@ -171,6 +173,13 @@ try {
     $sysDrive = Get-PSDrive -Name ($env:SystemDrive.TrimEnd(':')) -ErrorAction SilentlyContinue
     if (-not $scanOnly -and $sysDrive -and ($sysDrive.Free / 1GB) -lt [int]$config.MinFreeSpaceGB) {
         Add-Result (New-UpdateResult -Source 'system' -Name 'msg.diskSpace' -Status Info -Message ('{0:N1} GB' -f ($sysDrive.Free / 1GB)))
+    }
+
+    if ($SelfUpdateOnly) {
+        Step 'self' 50 'Updating Update Center'
+        try { Add-Result (Set-UpdateMeta -Item (Invoke-SelfUpdate -Repo $config.SelfUpdate.Repo)) }
+        catch { Add-Result (New-UpdateResult -Source 'self' -Name 'Update Center' -Status Failed -Message $_.Exception.Message) }
+        throw [System.OperationCanceledException]::new('self-update only')
     }
 
     # ============================================================== phase 1: collect candidates
@@ -235,7 +244,10 @@ try {
         $selPath = [IO.Path]::GetFullPath($Selection)
         # Only accept selection files from the admin-protected state folder.
         if (-not $selPath.StartsWith((Get-AppPaths).StateDir, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $selPath)) { throw 'Selection file rejected' }
-        $keys = @(Get-Content $selPath -Raw -Encoding UTF8 | ConvertFrom-Json)
+        # PS 5.1 emits a JSON array from ConvertFrom-Json as ONE object - enumerate it explicitly.
+        $parsed = Get-Content $selPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $keys = @($parsed | ForEach-Object { [string]$_ })
+        Write-Log -Message "Selection: $($keys.Count) item(s)"
         Remove-Item $selPath -Force -ErrorAction SilentlyContinue
         $selected = @($available | Where-Object { $keys -contains $_.Key })
     } elseif ($Scheduled) {
@@ -339,9 +351,9 @@ try {
 
         foreach ($c in (Select-BySource 'self')) {
             if (Test-Stop) { break }
-            Set-ItemState -Key $c.Key -State 'Running'; Step 'self' (Next-Percent) 'Updating ALERION Update'
+            Set-ItemState -Key $c.Key -State 'Running'; Step 'self' (Next-Percent) 'Updating Update Center'
             try { Complete-Item (Invoke-SelfUpdate -Repo $config.SelfUpdate.Repo) $c }
-            catch { Complete-Item (New-UpdateResult -Source 'self' -Name 'ALERION Update' -Status Failed -Message $_.Exception.Message) $c }
+            catch { Complete-Item (New-UpdateResult -Source 'self' -Name 'Update Center' -Status Failed -Message $_.Exception.Message) $c }
         }
 
         if ($cancelled) {
@@ -381,7 +393,7 @@ catch [System.OperationCanceledException] {
 catch {
     $exitCode = 1
     Write-Log -Level ERROR -Message ("Unexpected error: {0}`n{1}" -f $_.Exception.Message, $_.ScriptStackTrace)
-    Add-Result (New-UpdateResult -Source 'system' -Name 'ALERION Update' -Status Failed -Message $_.Exception.Message)
+    Add-Result (New-UpdateResult -Source 'system' -Name 'Update Center' -Status Failed -Message $_.Exception.Message)
 }
 finally {
     foreach ($j in @($jobs.Values)) { try { Stop-Job $j -ErrorAction SilentlyContinue; Remove-Job $j -Force -ErrorAction SilentlyContinue } catch { } }
@@ -459,6 +471,12 @@ finally {
         Write-Log -Level OK -Message 'Scan finished'
     }
     Clear-Cancel
+    # Still inside the old 'ALERION Update' folder (in-place update from v1.x): finish the move.
+    if ((Test-IsAdmin) -and (Test-LegacyInstall) -and -not $scanOnly) {
+        $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $cmd = "Start-Sleep -Seconds 15; & '$(Join-Path (Get-AppPaths).AppRoot 'Install.ps1')' -NoLaunch -Quiet"
+        Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
+    }
     Complete-Status -ReportPath $(if ($reportPath) { $reportPath.Json } else { $null })
     Remove-OldFiles -Days $(if ($config) { [int]$config.LogRetentionDays } else { 60 })
     $mutex.ReleaseMutex(); $mutex.Dispose()

@@ -1,4 +1,4 @@
-// ALERION Update - view model for the update list (compiled at runtime by Gui.ps1).
+// Update Center - view model for the update list (compiled at runtime by Gui.ps1).
 // A real class is needed because WPF only refreshes checkboxes/states through INotifyPropertyChanged.
 using System.ComponentModel;
 

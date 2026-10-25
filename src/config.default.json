@@ -6,6 +6,7 @@
   "Reboot": "Prompt",
   "RebootTime": "03:00",
   "RestorePoint": true,
+  "StartWithWindows": false,
   "Schedule": {
     "Type": "Weekly",
     "Time": "18:00",

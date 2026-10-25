@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    ALERION Update - WPF user interface (overview, update list with search/selection, history, settings).
+    Update Center - WPF user interface (overview, update list with search/selection, history, settings).
     Layout and styles live in Gui.xaml; this file wires up data and behaviour.
 .PARAMETER Monitor
     Opened by a scheduled run: shows the progress of the already running engine.
@@ -16,6 +16,7 @@ param(
     [switch]$Preview,
     [ValidateSet('Overview', 'Updates', 'History', 'Settings')][string]$Page = 'Overview',
     [string]$Query,
+    [switch]$Minimized,
     [ValidateSet('', 'Restart', 'Info')][string]$Dialog = '',
     [int]$X = -1,
     [int]$Y = -1
@@ -25,10 +26,10 @@ $ErrorActionPreference = 'Stop'
 # Never fail silently: log unexpected GUI errors and tell the user where the log is.
 trap {
     $msg = "{0:yyyy-MM-dd HH:mm:ss} {1}`n{2}" -f (Get-Date), $_.Exception.Message, $_.ScriptStackTrace
-    $logDir = Join-Path $env:ProgramData 'ALERION\Update\logs'
+    $logDir = Join-Path $env:ProgramData 'UpdateCenter\logs'
     try { Add-Content -Path (Join-Path $logDir 'gui-error.log') -Value $msg -Encoding UTF8 } catch { }
     if (-not $Snapshot) {
-        try { [void][System.Windows.MessageBox]::Show("ALERION Update: $($_.Exception.Message)`n`n$logDir\gui-error.log", 'ALERION Update', 'OK', 'Error') } catch { }
+        try { [void][System.Windows.MessageBox]::Show("Update Center: $($_.Exception.Message)`n`n$logDir\gui-error.log", 'Update Center', 'OK', 'Error') } catch { }
     }
     break
 }
@@ -41,6 +42,7 @@ $src = $PSScriptRoot
 Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Report.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Scheduler.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $src 'Providers.psm1') -DisableNameChecking -Force
 $devMode = [bool]($Snapshot -or $Preview)
 
 # ------------------------------------------------------------------ elevation
@@ -57,8 +59,8 @@ if (-not (Test-IsAdmin) -and -not $devMode) {
 }
 
 # ------------------------------------------------------------------ single window
-$showEvent = New-Object System.Threading.EventWaitHandle($false, 'AutoReset', 'Local\ALERION-Update-GUI-Show')
-$guiMutex = New-Object System.Threading.Mutex($false, 'Local\ALERION-Update-GUI')
+$showEvent = New-Object System.Threading.EventWaitHandle($false, 'AutoReset', 'Local\UpdateCenter-GUI-Show')
+$guiMutex = New-Object System.Threading.Mutex($false, 'Local\UpdateCenter-GUI')
 if (-not $devMode -and -not $guiMutex.WaitOne(0)) { [void]$showEvent.Set(); exit 0 }
 
 if (-not ('Alerion.UpdateRow' -as [type])) {
@@ -86,16 +88,7 @@ if (Test-Path $largeLogo) { $ui.HeroLogo.Source = [Windows.Media.Imaging.BitmapI
 $brushConverter = New-Object System.Windows.Media.BrushConverter
 function Get-Brush { param([string]$Hex) $brushConverter.ConvertFromString($Hex) }
 
-$window.Add_SourceInitialized({
-    $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle
-    $glass = $false
-    if (-not $Snapshot) {
-        # Transparent composition target + acrylic backdrop = real glass (Windows 11 22H2+).
-        [System.Windows.Interop.HwndSource]::FromHwnd($hwnd).CompositionTarget.BackgroundColor = [System.Windows.Media.Colors]::Transparent
-        $glass = [Alerion.ShellUtil]::StyleWindow($hwnd)
-    }
-    if (-not $glass) { $ui.Tint.Background = Get-Brush '#FF0E1015' }   # solid fallback (Windows 10 / snapshots)
-})
+# The window is opaque with its own rounded frame + shadow (Gui.xaml); no DWM glass any more.
 
 # ------------------------------------------------------------------ state
 $prioColors  = @{ Critical = '#FF453A'; Important = '#FF9F0A'; Normal = '#3D7BFF'; Optional = '#8A93A1' }
@@ -218,6 +211,7 @@ function Show-RestartDialog { param($Plan)
     # "restart at" row: time box + button
     $row = New-Object System.Windows.Controls.Grid; $row.Margin = [System.Windows.Thickness]::new(0, 10, 0, 0)
     $box = New-Object System.Windows.Controls.TextBox; $box.Width = 90; $box.HorizontalAlignment = 'Left'; $box.Text = $config.RebootTime
+    Add-TimePicker $box
     $plan = New-Object System.Windows.Controls.Button; $plan.Style = $window.FindResource('Secondary'); $plan.Margin = [System.Windows.Thickness]::new(100, 0, 0, 0)
     $plan.Content = T 'dlg.restartAt'; $plan.Tag = $box
     $plan.Add_Click({ param($s) $t = $s.Tag.Text.Trim(); Close-Dialog; Set-PlannedRestart -Time $t })
@@ -268,6 +262,9 @@ function Set-Texts {
     $ui.ChkParallel.Content = T 'set.parallel'; $ui.ChkRestore.Content = T 'set.restore'; $ui.LblLang.Text = T 'set.language'
     $ui.LblSources.Text = (T 'set.sources').ToUpper(); $ui.LblExcl.Text = (T 'set.exclusions').ToUpper(); $ui.TxtExclHint.Text = T 'set.exclHint'; $ui.BtnExclAdd.Content = T 'set.exclAdd'
     $ui.LblSelf.Text = (T 'set.selfTitle').ToUpper(); $ui.ChkSelf.Content = T 'set.selfUpdate'; $ui.LblRepo.Text = T 'set.selfRepo'
+    $ui.ChkAutostart.Content = T 'set.autostart'; $ui.LblNotify.Text = T 'set.notify'; $ui.TxtNotifyHint.Text = T 'set.notifyHint'; $ui.BtnTestToast.Content = T 'set.testToast'
+    $ui.LblAppVersion.Text = T 'set.appVersion' @($version); $ui.TxtAppUpdateStatus.Text = T 'set.appCheckHint'; $ui.BtnCheckAppUpdate.Content = T 'set.checkUpdate'
+    $ui.BtnSave.Content = T 'set.save'; $ui.BtnDiscard.Content = T 'set.discard'
     foreach ($k in $sourceKeys) { $sourceBoxes[$k].Content = T "set.src.$k" }
     $e = Get-Estimate
     $ui.TxtRestartEstimate.Text = if ($e.Measured) { T 'set.estimateMeasured' @((Format-RestartEstimate -Estimate (Get-RestartEstimate -WithUpdates $false)), $e.Samples) } else { T 'set.estimateDefault' }
@@ -291,7 +288,7 @@ function Initialize-Controls {
         if ($k -in 'WingetIncludeUnknown', 'WindowsUpdateDrivers', 'MicrosoftUpdate') { $row.Padding = [System.Windows.Thickness]::new(42, 11, 18, 11); $cb.Foreground = Get-Brush '#B8C0CC' }
         $row.Child = $cb
         $sourceBoxes[$k] = $cb; $sourceRows[$k] = $row; [void]$ui.SourcePanel.Children.Add($row)
-        $cb.Add_Click({ Save-Settings })
+        $cb.Add_Click({ Register-Change })
     }
     $ui.CmbDom.Items.Clear(); 1..28 | ForEach-Object { [void]$ui.CmbDom.Items.Add((New-ComboItem $_ "$_.")) }
     $ui.CmbLang.Items.Clear(); [void]$ui.CmbLang.Items.Add((New-ComboItem 'de' 'Deutsch')); [void]$ui.CmbLang.Items.Add((New-ComboItem 'en' 'English'))
@@ -314,10 +311,96 @@ function Show-Config {
     $ui.ChkParallel.IsChecked = [bool]$config.Parallel; $ui.ChkRestore.IsChecked = [bool]$config.RestorePoint
     foreach ($k in $sourceKeys) { $sourceBoxes[$k].IsChecked = [bool]$config.Sources.$k }
     $ui.ChkSelf.IsChecked = [bool]$config.SelfUpdate.Enabled; $ui.TxtRepo.Text = $config.SelfUpdate.Repo
+    $ui.ChkAutostart.IsChecked = [bool]$config.StartWithWindows
     $ui.ExclChips.ItemsSource = @($config.ExcludedPackages)
     Update-SettingsUi
+    Set-Dirty $false
     $script:loading = $false
 }
+
+# ------------------------------------------------------------------ time picker (select-all + hour/minute lists)
+function Sync-TimePicker { param($State)
+    if ($State.Box.Text -match '^([01]\d|2[0-3]):([0-5]\d)$') {
+        $State.Sync = $true
+        $State.Hours.SelectedIndex = [int]$Matches[1]; $State.Mins.SelectedIndex = [int]$Matches[2]
+        $State.Hours.ScrollIntoView($State.Hours.SelectedItem); $State.Mins.ScrollIntoView($State.Mins.SelectedItem)
+        $State.Sync = $false
+    }
+}
+
+function Add-TimePicker {
+    param([System.Windows.Controls.TextBox]$Box)
+    $pop = New-Object System.Windows.Controls.Primitives.Popup
+    $pop.PlacementTarget = $Box; $pop.Placement = 'Bottom'; $pop.StaysOpen = $false; $pop.AllowsTransparency = $true; $pop.PopupAnimation = 'Fade'
+    $frame = New-Object System.Windows.Controls.Border
+    $frame.Background = Get-Brush '#22252D'; $frame.BorderBrush = Get-Brush '#24FFFFFF'; $frame.BorderThickness = [System.Windows.Thickness]::new(1)
+    $frame.CornerRadius = [System.Windows.CornerRadius]::new(14); $frame.Padding = [System.Windows.Thickness]::new(6); $frame.Margin = [System.Windows.Thickness]::new(0, 6, 8, 12)
+    $shadow = New-Object System.Windows.Media.Effects.DropShadowEffect; $shadow.BlurRadius = 20; $shadow.ShadowDepth = 4; $shadow.Opacity = 0.45; $frame.Effect = $shadow
+    $panel = New-Object System.Windows.Controls.StackPanel; $panel.Orientation = 'Horizontal'
+    $state = @{ Box = $Box; Pop = $pop; Sync = $false; Hours = $null; Mins = $null }
+    foreach ($part in 'Hours', 'Mins') {
+        $lb = New-Object System.Windows.Controls.ListBox
+        $lb.Width = 62; $lb.Height = 216; $lb.Background = Get-Brush '#00000000'; $lb.BorderThickness = [System.Windows.Thickness]::new(0)
+        $lb.Foreground = Get-Brush '#D5DAE3'; $lb.ItemContainerStyle = $window.FindResource('TimeItem')
+        [System.Windows.Controls.ScrollViewer]::SetVerticalScrollBarVisibility($lb, 'Hidden')
+        $count = if ($part -eq 'Hours') { 24 } else { 60 }
+        for ($i = 0; $i -lt $count; $i++) { [void]$lb.Items.Add(('{0:00}' -f $i)) }
+        $lb.Tag = $state
+        $lb.Add_SelectionChanged({ param($s)
+            $st = $s.Tag
+            if ($st.Sync -or -not $st.Hours.SelectedItem -or -not $st.Mins.SelectedItem) { return }
+            $st.Box.Text = '{0}:{1}' -f $st.Hours.SelectedItem, $st.Mins.SelectedItem
+            $st.Box.SelectAll()
+        })
+        $state[$part] = $lb
+        [void]$panel.Children.Add($lb)
+        if ($part -eq 'Hours') {
+            $sep = New-Object System.Windows.Controls.TextBlock; $sep.Text = ':'; $sep.FontSize = 16; $sep.Foreground = Get-Brush '#6B7380'
+            $sep.VerticalAlignment = 'Center'; $sep.Margin = [System.Windows.Thickness]::new(2, 0, 2, 0); [void]$panel.Children.Add($sep)
+        }
+    }
+    $frame.Child = $panel; $pop.Child = $frame
+    $Box.Tag = $state
+    # first click selects everything (so typing replaces it) and opens the picker
+    $Box.Add_PreviewMouseLeftButtonDown({ param($s, $e) if (-not $s.IsKeyboardFocusWithin) { [void]$s.Focus(); $e.Handled = $true } })
+    $Box.Add_GotKeyboardFocus({ param($s) $s.SelectAll(); $s.Tag.Pop.IsOpen = $true; Sync-TimePicker $s.Tag })
+    $Box.Add_TextChanged({ param($s) if ($s.Tag.Pop.IsOpen -and -not $s.Tag.Sync) { Sync-TimePicker $s.Tag } })
+    $Box.Add_KeyDown({ param($s, $e) if ($e.Key -in 'Return', 'Escape', 'Tab') { $s.Tag.Pop.IsOpen = $false } })
+}
+
+# ------------------------------------------------------------------ app self-update
+function Find-AppUpdate {
+    $repo = $config.SelfUpdate.Repo
+    if (-not $repo) { Show-AppToast (T 'set.appNoRepo') 'error'; return }
+    $ui.TxtAppUpdateStatus.Text = T 'set.checking'; $ui.BtnCheckAppUpdate.IsEnabled = $false
+    # let the UI render "checking" before the (short) network call
+    [void]$window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background, [Action]{
+        try { $r = Invoke-SelfUpdate -Repo $config.SelfUpdate.Repo -DryRun } catch { $r = $null; $err = $_.Exception.Message }
+        $ui.BtnCheckAppUpdate.IsEnabled = $true
+        if ($r -and $r.Status -eq 'Available') {
+            $ui.TxtAppUpdateStatus.Text = T 'set.appAvailable' @($r.To)
+            Show-Dialog -Title (T 'dlg.appUpdateTitle' @($r.To)) -Text (T 'dlg.appUpdateText' @($version, $r.To)) -Glyph ([string][char]0xE896) -Buttons @(
+                @{ Text = T 'dlg.appUpdateNow'; Kind = 'Primary'; Action = { Start-Engine -Mode install -SelfOnly } },
+                @{ Text = T 'dlg.later'; Kind = 'Ghost' })
+        } elseif ($r -and $r.Status -eq 'Info') {
+            $ui.TxtAppUpdateStatus.Text = T 'set.appCurrent' @($version)
+            Show-AppToast (T 'set.appCurrent' @($version))
+        } else {
+            $msg = if ($r) { Resolve-Text $r.Message } else { $err }
+            $ui.TxtAppUpdateStatus.Text = T 'set.appUpdateFailed' @($msg)
+            Show-AppToast (T 'set.appUpdateFailed' @($msg)) 'error'
+        }
+    })
+}
+
+function Set-Dirty { param([bool]$Dirty)
+    $script:dirty = $Dirty
+    $ui.DirtyDot.Visibility = if ($Dirty) { 'Visible' } else { 'Collapsed' }
+    $ui.TxtSaveState.Text = if ($Dirty) { T 'set.unsaved' } else { T 'set.allSaved' }
+    $ui.BtnSave.IsEnabled = $Dirty; $ui.BtnDiscard.IsEnabled = $Dirty
+}
+
+function Register-Change { if (-not $script:loading) { Update-SettingsUi; Set-Dirty $true } }
 
 function Update-SettingsUi {
     $type = if ($ui.CmbSchedule.SelectedItem) { [string]$ui.CmbSchedule.SelectedItem.Tag } else { 'Manual' }
@@ -335,17 +418,22 @@ function Update-SettingsUi {
     $ui.TxtSelfStatus.Text = if ($repo) { T 'set.selfReady' @($repo) } else { T 'set.selfMissing' }
 }
 
-function Show-Saved { param([string]$Text, [string]$Color = '#5BE584')
-    $ui.TxtSaved.Text = $Text; $ui.TxtSaved.Foreground = Get-Brush $Color
+function Show-AppToast {
+    <# Small in-app notification at the top of the window (fades in and out). #>
+    param([string]$Text, [ValidateSet('ok', 'error', 'info')][string]$Kind = 'ok')
+    $ui.ToastText.Text = $Text
+    $map = @{ ok = @('#30D158', [string][char]0xE73E); error = @('#FF453A', [string][char]0xE711); info = @('#3D7BFF', [string][char]0xE946) }
+    $ui.ToastIconBg.Background = Get-Brush $map[$Kind][0]; $ui.ToastIcon.Text = $map[$Kind][1]
+    $ui.ToastPill.BorderBrush = Get-Brush ('#40' + $map[$Kind][0].Substring(1))
     $a = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
-    foreach ($kf in @(@(0, 0), @(150, 1), @(1800, 1), @(2300, 0))) {
+    foreach ($kf in @(@(0, 0), @(180, 1), @(2600, 1), @(3100, 0))) {
         [void]$a.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame($kf[1], [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds($kf[0])))))
     }
-    $ui.SavedPill.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $a)
+    $ui.ToastPill.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $a)
 }
-
 function Save-Settings {
-    if ($script:loading) { return }
+    <# Explicit save: Save button, leaving the settings page or closing the window. Returns $true on success. #>
+    if ($script:loading -or -not $script:dirty) { return $true }
     Update-SettingsUi
     try {
         $c = Get-Config
@@ -365,17 +453,22 @@ function Save-Settings {
         $c.Language = [string]$ui.CmbLang.SelectedItem.Tag
         $c.SelfUpdate.Repo = $ui.TxtRepo.Text.Trim()
         $c.SelfUpdate.Enabled = [bool]$ui.ChkSelf.IsChecked -and [bool]$c.SelfUpdate.Repo
-        if ($devMode) { $script:config = $c; Show-Saved (T 'set.saved'); return }
+        $c.StartWithWindows = [bool]$ui.ChkAutostart.IsChecked
+        if ($devMode) { $script:config = $c; Set-Dirty $false; Show-AppToast (T 'set.saved'); return $true }
         Save-Config -Config $c
+        if ([bool]$c.StartWithWindows -ne [bool]$script:config.StartWithWindows) { Set-Autostart -Enabled ([bool]$c.StartWithWindows) }
         $scheduleChanged = ($c.Schedule | ConvertTo-Json -Compress) -ne ($script:config.Schedule | ConvertTo-Json -Compress)
         if ($scheduleChanged) { Register-ScheduleTask -Config $c }
         $langChanged = $c.Language -ne $script:config.Language
         $script:config = $c
         if ($langChanged) { Import-I18n -Language $c.Language; Set-Texts; Show-Config; Update-RowTexts }
         Show-Summary
-        Show-Saved (T 'set.saved')
+        Set-Dirty $false
+        Show-AppToast (T 'set.saved')
+        return $true
     } catch {
-        Show-Saved (T 'set.invalid' @($_.Exception.Message)) '#FF6B61'
+        Show-AppToast (T 'set.invalid' @($_.Exception.Message)) 'error'
+        return $false
     }
 }
 
@@ -387,7 +480,7 @@ function Set-Exclusion {
     $list = [System.Collections.Generic.List[string]]@($c.ExcludedPackages)
     if ($Exclude) { if (-not $list.Contains($Id)) { $list.Add($Id) } } else { [void]$list.Remove($Id) }
     $c.ExcludedPackages = $list.ToArray()
-    if (-not $devMode) { try { Save-Config -Config $c } catch { Show-Saved (T 'set.invalid' @($_.Exception.Message)) '#FF6B61'; return } }
+    if (-not $devMode) { try { Save-Config -Config $c } catch { Show-AppToast (T 'set.invalid' @($_.Exception.Message)) 'error'; return } }
     $script:config = $c
     $ui.ExclChips.ItemsSource = @($c.ExcludedPackages)
     foreach ($r in $rows) { Update-RowExclusion $r }
@@ -598,7 +691,7 @@ function Test-EngineRunning {
 }
 
 function Start-Engine {
-    param([ValidateSet('scan', 'install')][string]$Mode, [string[]]$Keys)
+    param([ValidateSet('scan', 'install')][string]$Mode, [string[]]$Keys, [switch]$SelfOnly)
     if ($devMode) { return }
     if (Test-EngineRunning) {
         Show-Dialog -Title (T 'ov.alreadyRunning') -Glyph ([string][char]0xE895) -Buttons @(@{ Text = 'OK'; Kind = 'Secondary' }); return
@@ -606,12 +699,15 @@ function Start-Engine {
     $engine = Join-Path $src 'UpdateEngine.ps1'
     $a = "--headless `"$PSHOME\powershell.exe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$engine`" -FromGui"
     if ($Mode -eq 'scan') { $a += ' -Scan' }
+    if ($SelfOnly) { $a += ' -SelfUpdateOnly' }
     if ($Keys) {
         $sel = Join-Path $paths.StateDir 'selection.json'
         Write-AtomicFile -Path $sel -Content (ConvertTo-Json @($Keys) -Compress)
         $a += " -Selection `"$sel`""
     }
     [void](Start-Process -FilePath "$env:WINDIR\System32\conhost.exe" -ArgumentList $a -PassThru)
+    # Until the engine has written a fresh status, status.json still describes the previous run.
+    $script:launchAt = Get-Date
     $ui.LogList.Items.Clear()
     $script:running = $true; $script:runMode = $Mode; $script:wasRunning = $true
     Update-Counts
@@ -630,6 +726,10 @@ function Complete-InstallRun {
     <# After an install: history, restart handling (in-app), fresh scan. #>
     Show-Summary; Show-History; Show-Page 'History'; [void]$window.Activate()
     $rep = Get-LastReport
+    if ($rep -and @($rep.Items | Where-Object { $_.Source -eq 'self' -and $_.Status -eq 'Updated' }).Count) {
+        Show-Dialog -Title (T 'dlg.appUpdatedTitle') -Text (T 'dlg.appUpdatedText') -Glyph ([string][char]0xE73E) -Colors @('#30D158', '#22A06B') -Buttons @(@{ Text = 'OK'; Kind = 'Primary' })
+        return
+    }
     if ($rep -and $rep.RebootRequired -and -not $rep.DryRun) {
         $plan = if ($rep.PSObject.Properties.Name -contains 'RestartPlan') { $rep.RestartPlan } else { $null }
         $script:estimate = $null
@@ -651,6 +751,17 @@ $timer.Interval = [TimeSpan]::FromMilliseconds(700)
 $timer.Add_Tick({
     if ($showEvent.WaitOne(0)) { if ($window.WindowState -eq 'Minimized') { $window.WindowState = 'Normal' }; [void]$window.Activate() }
     $st = Get-Status
+    if ($script:launchAt) {
+        $fresh = $st -and $st.StartedAt -and ([datetime]::Parse($st.StartedAt) -ge $script:launchAt.AddSeconds(-2))
+        if (-not $fresh) {
+            if (((Get-Date) - $script:launchAt).TotalSeconds -gt 90) {
+                $script:launchAt = $null; $script:running = $false; $script:wasRunning = $false; Update-Counts
+                Show-Dialog -Title (T 'ov.alreadyRunning') -Glyph ([string][char]0xE783) -Buttons @(@{ Text = 'OK'; Kind = 'Secondary' })
+            }
+            return
+        }
+        $script:launchAt = $null
+    }
     if (-not $st) { return }
     $alive = $st.Running -and (Get-Process -Id $st.Pid -ErrorAction SilentlyContinue)
     if ($alive) {
@@ -678,10 +789,17 @@ $timer.Add_Tick({
 $ui.BtnClose.Add_Click({ $window.Close() })
 $ui.BtnMin.Add_Click({ $window.WindowState = 'Minimized' })
 $ui.BtnMax.Add_Click({ $window.WindowState = if ($window.WindowState -eq 'Maximized') { 'Normal' } else { 'Maximized' } })
-$window.Add_StateChanged({ $ui.Root.Margin = if ($window.WindowState -eq 'Maximized') { [System.Windows.Thickness]::new(7) } else { [System.Windows.Thickness]::new(0) } })
-$ui.NavOverview.Add_Checked({ Show-Page 'Overview' })
-$ui.NavUpdates.Add_Checked({ Show-Page 'Updates' })
-$ui.NavHistory.Add_Checked({ Show-Page 'History'; Show-History })
+$window.Add_StateChanged({
+    # Maximized: no shadow margin, square corners (the window touches the screen edges).
+    $max = $window.WindowState -eq 'Maximized'
+    $ui.Root.Margin = [System.Windows.Thickness]::new($(if ($max) { 7 } else { 12 }))
+    $r = [System.Windows.CornerRadius]::new($(if ($max) { 0 } else { 18 }))
+    $ui.WindowShadow.CornerRadius = $r; $ui.WindowFrame.CornerRadius = $r; $ui.DialogDim.CornerRadius = $r
+})
+function Leave-Settings { if ($ui.PageSettings.Visibility -eq 'Visible' -and $script:dirty) { [void](Save-Settings) } }
+$ui.NavOverview.Add_Checked({ Leave-Settings; Show-Page 'Overview' })
+$ui.NavUpdates.Add_Checked({ Leave-Settings; Show-Page 'Updates' })
+$ui.NavHistory.Add_Checked({ Leave-Settings; Show-Page 'History'; Show-History })
 $ui.NavSettings.Add_Checked({ Show-Page 'Settings' })
 
 $ui.BtnScan.Add_Click({ Start-Engine -Mode scan })
@@ -690,7 +808,7 @@ $ui.BtnRecommended.Add_Click({ Start-Install @($rows | Where-Object { $_.Selecta
 $ui.BtnInstallSelected.Add_Click({ Start-Install @($rows | Where-Object { $_.Selected -and $_.Selectable }) })
 $ui.BtnSelectNone.Add_Click({ foreach ($r in $rows) { $r.Selected = $false }; Update-Counts })
 $ui.BtnRestart.Add_Click({ Show-RestartDialog $null })
-$ui.DialogLayer.Add_MouseLeftButtonDown({ param($s, $e) if ($e.OriginalSource -eq $ui.DialogLayer) { Close-Dialog } })
+$ui.DialogLayer.Add_MouseLeftButtonDown({ param($s, $e) if ($e.OriginalSource -eq $ui.DialogDim) { Close-Dialog } })
 $ui.BtnToggleLog.Add_Click({
     $ui.LogList.Visibility = if ($ui.LogList.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' }
     $ui.BtnToggleLog.Content = if ($ui.LogList.Visibility -eq 'Visible') { T 'ov.hideLog' } else { T 'ov.showLog' }
@@ -731,15 +849,17 @@ $ui.ReportList.Add_SelectionChanged({ if ($ui.ReportList.SelectedItem) { $script
 $ui.BtnLogs.Add_Click({ Start-Process explorer.exe -ArgumentList "`"$($paths.LogDir)`"" })
 $ui.BtnHtml.Add_Click({ $r = $script:shownReport; if ($r -and (Test-Path $r.HtmlPath)) { Start-Process $r.HtmlPath } })
 
-# settings auto-save
-foreach ($c in 'CmbSchedule', 'CmbDay', 'CmbDom', 'CmbReboot', 'CmbLang') { $ui[$c].Add_SelectionChanged({ Save-Settings }) }
-foreach ($c in 'ChkWake', 'ChkParallel', 'ChkRestore', 'ChkSelf', 'ChkPrioCritical', 'ChkPrioImportant', 'ChkPrioNormal', 'ChkPrioOptional') { $ui[$c].Add_Click({ Save-Settings }) }
-foreach ($c in 'RbActInstall', 'RbActNotify', 'RbVisible', 'RbSilent') { $ui[$c].Add_Checked({ Save-Settings }) }
-foreach ($c in 'TxtTime', 'TxtRepo', 'TxtRebootTime') {
-    $ui[$c].Add_LostFocus({ Save-Settings })
-    $ui[$c].Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { Save-Settings } })
-}
-$ui.TxtRepo.Add_TextChanged({ Update-SettingsUi })
+# settings: changes are collected and saved with the Save button / when leaving the page / on close
+foreach ($c in 'CmbSchedule', 'CmbDay', 'CmbDom', 'CmbReboot', 'CmbLang') { $ui[$c].Add_SelectionChanged({ Register-Change }) }
+foreach ($c in 'ChkWake', 'ChkParallel', 'ChkRestore', 'ChkSelf', 'ChkAutostart', 'ChkPrioCritical', 'ChkPrioImportant', 'ChkPrioNormal', 'ChkPrioOptional') { $ui[$c].Add_Click({ Register-Change }) }
+foreach ($c in 'RbActInstall', 'RbActNotify', 'RbVisible', 'RbSilent') { $ui[$c].Add_Checked({ Register-Change }) }
+foreach ($c in 'TxtTime', 'TxtRepo', 'TxtRebootTime') { $ui[$c].Add_TextChanged({ Register-Change }) }
+$ui.BtnSave.Add_Click({ [void](Save-Settings) })
+$ui.BtnDiscard.Add_Click({ $script:config = Get-Config; Show-Config; Show-AppToast (T 'set.discarded') 'info' })
+$ui.BtnTestToast.Add_Click({ Show-Toast -Title (T 'toast.testTitle') -Body (T 'toast.testBody'); Show-AppToast (T 'set.testSent') 'info' })
+$ui.BtnCheckAppUpdate.Add_Click({ Find-AppUpdate })
+Add-TimePicker $ui.TxtTime
+Add-TimePicker $ui.TxtRebootTime
 
 # keyboard: Ctrl+F search, F5 rescan, Esc closes dialog / clears search
 $window.Add_PreviewKeyDown({
@@ -749,6 +869,7 @@ $window.Add_PreviewKeyDown({
     elseif ($e.Key -eq 'F5' -and -not $script:running) { Start-Engine -Mode scan; $e.Handled = $true }
     elseif ($e.Key -eq 'Escape' -and $ui.TxtSearch.IsKeyboardFocused) { $ui.TxtSearch.Text = '' }
 })
+$window.Add_Closing({ if ($script:dirty) { [void](Save-Settings) } })
 $window.Add_Closed({ $timer.Stop(); try { $guiMutex.ReleaseMutex() } catch { } })
 
 # ------------------------------------------------------------------ dev aids
@@ -790,7 +911,14 @@ if ($Preview) {
     $window.Add_ContentRendered({ Show-Page $Page; if ($Page -eq 'History') { Show-History }; if ($Query) { $ui.TxtSearch.Text = $Query }; Invoke-DevDialog })
     [void]$window.ShowDialog(); return
 }
-if (Test-EngineRunning) {
+if ($Minimized) { $window.WindowState = 'Minimized' }
+if (Test-LegacyInstall) {
+    # Files were updated in place inside the old 'ALERION Update' folder: finish the move to
+    # 'Update Center' (installer stops this window, migrates and reopens the app).
+    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $paths.AppRoot 'Install.ps1')`" -NoLaunch -Quiet"
+    $window.Add_ContentRendered({ Show-Dialog -Title (T 'dlg.migratingTitle') -Text (T 'dlg.migratingText') -Glyph ([string][char]0xE895) })
+} elseif (Test-EngineRunning) {
     $st = Get-Status; $script:running = $true; $script:wasRunning = $true; $script:runMode = [string]$st.Mode; Update-Counts
 } elseif (-not $script:scanAt -or ((Get-Date) - $script:scanAt).TotalMinutes -gt 30) {
     Start-Engine -Mode scan   # fresh list on open

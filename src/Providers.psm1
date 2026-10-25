@@ -1,4 +1,4 @@
-# ALERION Update - update providers.
+# Update Center - update providers.
 # Every provider returns result objects created by New-UpdateResult so the report stays uniform.
 # Keep this file ASCII-only (Windows PowerShell 5.1).
 
@@ -232,7 +232,6 @@ function Invoke-WingetPackageUpgrade {
     $code = $r.ExitCode
     $kind = if ($script:WingetCodes.ContainsKey($code)) { $script:WingetCodes[$code] } else { 'ERROR' }
     if ($r.TimedOut) { $kind = 'TIMEOUT' }
-    if ($kind -eq 'OK' -and $r.Output -match '(?i)restart|neustart') { $kind = 'REBOOT' }
     Write-Log -Level $(if ($kind -in 'OK', 'REBOOT') { 'OK' } else { 'WARN' }) -Message ("winget {0}: exit {1} ({2})" -f $Package.Id, $code, $kind)
     $base = @{ Source = 'winget'; Name = $Package.Name; Id = $Package.Id; From = $Package.Version; To = $Package.Available }
     switch ($kind) {
@@ -312,7 +311,7 @@ function Find-WindowsUpdates {
     <# Returns an IUpdateCollection-compatible list of applicable updates (already filtered). #>
     param([bool]$IncludeDrivers = $true, [bool]$UseMicrosoftUpdate = $true, [bool]$SkipNvidiaDisplay = $true, [bool]$SkipDefinitions = $false)
     $session = New-Object -ComObject Microsoft.Update.Session
-    $session.ClientApplicationID = 'ALERION Update'
+    $session.ClientApplicationID = 'Update Center'
     $searcher = $session.CreateUpdateSearcher()
     if ($UseMicrosoftUpdate -and (Enable-MicrosoftUpdate)) {
         $searcher.ServerSelection = 3   # ssOthers
@@ -393,7 +392,7 @@ function Install-WindowsUpdates {
     $updates = Select-WUUpdates -Updates @(Find-WindowsUpdates -IncludeDrivers $IncludeDrivers -UseMicrosoftUpdate $UseMicrosoftUpdate -SkipNvidiaDisplay $SkipNvidiaDisplay -SkipDefinitions $SkipDefinitions) -OnlyIds $OnlyIds
     if ($updates.Count -eq 0) { return $results.ToArray() }
     $session = New-Object -ComObject Microsoft.Update.Session
-    $session.ClientApplicationID = 'ALERION Update'
+    $session.ClientApplicationID = 'Update Center'
     $coll = New-Object -ComObject Microsoft.Update.UpdateColl
     foreach ($u in $updates) { if (-not $u.EulaAccepted) { $u.AcceptEula() }; [void]$coll.Add($u) }
 
@@ -599,7 +598,7 @@ function Install-NvidiaDriver {
 function New-RestorePoint {
     try {
         $warn = $null
-        Checkpoint-Computer -Description 'ALERION Update' -RestorePointType MODIFY_SETTINGS -ErrorAction Stop -WarningVariable warn -WarningAction SilentlyContinue
+        Checkpoint-Computer -Description 'Update Center' -RestorePointType MODIFY_SETTINGS -ErrorAction Stop -WarningVariable warn -WarningAction SilentlyContinue
         if ($warn) { return New-UpdateResult -Source 'system' -Name 'msg.restorePoint' -Status Skipped -Message 'msg.restorePointRecent' }
         return New-UpdateResult -Source 'system' -Name 'msg.restorePoint' -Status Updated -Message 'msg.restorePointCreated'
     } catch {
@@ -621,26 +620,30 @@ function Invoke-SelfUpdate {
     $current = Get-AppVersion
     $paths = Get-AppPaths
     $appRoot = if ($TargetRoot) { $TargetRoot } else { $paths.AppRoot }
-    $headers = @{ 'User-Agent' = 'ALERION-Update'; 'Accept' = 'application/vnd.github+json' }
+    $headers = @{ 'User-Agent' = 'UpdateCenter'; 'Accept' = 'application/vnd.github+json' }
     try {
         $rel = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers -TimeoutSec 30
     } catch {
         $code = $null
         try { $code = [int]$_.Exception.Response.StatusCode } catch { }
-        if ($code -eq 404) { return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -Status Info -Message 'msg.noRelease' }
-        return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -Status Skipped -Message $_.Exception.Message
+        if ($code -eq 404) { return New-UpdateResult -Source 'self' -Name 'Update Center' -From $current -Status Info -Message 'msg.noRelease' }
+        return New-UpdateResult -Source 'self' -Name 'Update Center' -From $current -Status Skipped -Message $_.Exception.Message
     }
     $tag = ([string]$rel.tag_name).TrimStart('v')
-    if ($tag -notmatch '^\d+\.\d+\.\d+$') { return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -Status Skipped -Message "invalid tag $($rel.tag_name)" }
-    if ([version]$tag -le [version]$current) { return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -To $current -Status Info -Message 'msg.upToDate' }
-    if ($DryRun) { return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -To $tag -Status Available }
+    if ($tag -notmatch '^\d+\.\d+\.\d+$') { return New-UpdateResult -Source 'self' -Name 'Update Center' -From $current -Status Skipped -Message "invalid tag $($rel.tag_name)" }
+    if ([version]$tag -le [version]$current) { return New-UpdateResult -Source 'self' -Name 'Update Center' -From $current -To $current -Status Info -Message 'msg.upToDate' }
+    if ($DryRun) { return New-UpdateResult -Source 'self' -Name 'Update Center' -From $current -To $tag -Status Available }
     if (-not $TargetRoot -and $appRoot -notlike "$env:ProgramFiles*") {
-        return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -To $tag -Status Skipped -Message 'msg.selfUpdateDevMode'
+        return New-UpdateResult -Source 'self' -Name 'Update Center' -From $current -To $tag -Status Skipped -Message 'msg.selfUpdateDevMode'
     }
-    $zipName = "ALERION-Update-v$tag.zip"
-    $zipAsset = @($rel.assets | Where-Object { $_.name -eq $zipName }) | Select-Object -First 1
-    $shaAsset = @($rel.assets | Where-Object { $_.name -eq "$zipName.sha256" }) | Select-Object -First 1
-    if (-not $zipAsset -or -not $shaAsset) { return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -To $tag -Status Skipped -Message 'msg.releaseIncomplete' }
+    # Current asset name first, v1.x name as fallback.
+    $zipAsset = $null; $shaAsset = $null; $zipName = $null
+    foreach ($candidate in @("UpdateCenter-v$tag.zip", "ALERION-Update-v$tag.zip")) {
+        $z = @($rel.assets | Where-Object { $_.name -eq $candidate }) | Select-Object -First 1
+        $h = @($rel.assets | Where-Object { $_.name -eq "$candidate.sha256" }) | Select-Object -First 1
+        if ($z -and $h) { $zipAsset = $z; $shaAsset = $h; $zipName = $candidate; break }
+    }
+    if (-not $zipAsset -or -not $shaAsset) { return New-UpdateResult -Source 'self' -Name 'Update Center' -From $current -To $tag -Status Skipped -Message 'msg.releaseIncomplete' }
     foreach ($a in @($zipAsset, $shaAsset)) {
         $u = [uri]$a.browser_download_url
         if ($u.Scheme -ne 'https' -or $u.Host -ne 'github.com') { throw "Untrusted self-update URL: $u" }
@@ -677,7 +680,15 @@ function Invoke-SelfUpdate {
     }
     Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
     Write-Log -Level OK -Message "Self-update applied: $current -> $tag"
-    return New-UpdateResult -Source 'self' -Name 'ALERION Update' -Id $Repo -From $current -To $tag -Status Updated
+    # Re-run the installer from the new files once this run is over: refreshes shortcuts, icon,
+    # tasks and migrates older installations (detached + delayed so the running engine can finish).
+    $installer = Join-Path $appRoot 'Install.ps1'
+    if (-not $TargetRoot -and (Test-Path $installer)) {
+        $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $cmd = "Start-Sleep -Seconds 20; & '$installer' -NoLaunch -Quiet"
+        Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
+    }
+    return New-UpdateResult -Source 'self' -Name 'Update Center' -Id $Repo -From $current -To $tag -Status Updated
 }
 
 # =====================================================================================

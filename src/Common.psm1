@@ -1,15 +1,30 @@
-# ALERION Update - shared helpers (paths, config, logging, i18n, status, notifications, ACLs).
+# Update Center - shared helpers (paths, config, logging, i18n, status, notifications, ACLs).
 # Keep this file ASCII-only: Windows PowerShell 5.1 reads BOM-less scripts as ANSI.
 
 Set-StrictMode -Version 2.0
 
 $script:SrcDir     = $PSScriptRoot
 $script:AppRoot    = Split-Path -Parent $PSScriptRoot
-$script:DataDir    = Join-Path $env:ProgramData 'ALERION\Update'
+# Product identity in one place (names, install/data folders, task folder, legacy v1.x 'ALERION Update' paths).
+$script:Product = [pscustomobject]@{
+    Name             = 'Update Center'
+    InstallDir       = Join-Path $env:ProgramFiles 'Update Center'
+    DataDir          = Join-Path $env:ProgramData 'UpdateCenter'
+    TaskPath         = '\UpdateCenter\'
+    ShortcutName     = 'Update Center.lnk'
+    UninstallKey     = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\UpdateCenter'
+    AppUserModelId   = 'UpdateCenter.App'
+    LegacyInstallDir = Join-Path $env:ProgramFiles 'ALERION Update'
+    LegacyDataDir    = Join-Path $env:ProgramData 'ALERION\Update'
+    LegacyTaskPath   = '\ALERION\'
+    LegacyShortcut   = 'ALERION Update.lnk'
+    LegacyUninstall  = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ALERION Update'
+}
+$script:DataDir    = $script:Product.DataDir
 # Test override (smoke test / CI). Ignored when elevated so user-level code cannot redirect
 # the elevated engine to a writable config folder.
-if ($env:ALERION_UPDATE_DATADIR -and -not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    $script:DataDir = $env:ALERION_UPDATE_DATADIR
+if ($env:UPDATECENTER_DATADIR -and -not ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $script:DataDir = $env:UPDATECENTER_DATADIR
 }
 $script:LogDir     = Join-Path $script:DataDir 'logs'
 $script:ReportDir  = Join-Path $script:DataDir 'reports'
@@ -25,6 +40,10 @@ $script:Lang       = 'de'
 $script:SidSystem = 'S-1-5-18'
 $script:SidAdmins = 'S-1-5-32-544'
 $script:SidUsers  = 'S-1-5-32-545'
+
+function Get-Product { $script:Product }
+
+function Test-LegacyInstall { $script:AppRoot -eq $script:Product.LegacyInstallDir }
 
 function Get-AppVersion {
     $file = Join-Path $script:AppRoot 'VERSION'
@@ -74,6 +93,12 @@ function Protect-Directory {
 
 function Initialize-DataDir {
     param([switch]$Harden)
+    # One-time migration of settings, reports and logs from the v1.x location.
+    if ((Test-IsAdmin) -and $script:DataDir -eq $script:Product.DataDir -and -not (Test-Path $script:DataDir) -and (Test-Path $script:Product.LegacyDataDir)) {
+        New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
+        Copy-Item (Join-Path $script:Product.LegacyDataDir '*') -Destination $script:DataDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $script:DataDir 'state\status.json') -Force -ErrorAction SilentlyContinue
+    }
     foreach ($d in @($script:DataDir, $script:LogDir, $script:ReportDir, $script:StateDir, $script:CacheDir)) {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     }
@@ -313,7 +338,7 @@ function Show-Toast {
         $doc = New-Object Windows.Data.Xml.Dom.XmlDocument
         $doc.LoadXml($xml)
         # Our own AppUserModelID only works once the Start menu shortcut carries it (Install.ps1).
-        $startLnk = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\ALERION Update.lnk'
+        $startLnk = Join-Path $env:ProgramData ('Microsoft\Windows\Start Menu\Programs\' + $script:Product.ShortcutName)
         $appId = if (Test-Path $startLnk) { $script:AppUserModelId } else { '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe' }
         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show([Windows.UI.Notifications.ToastNotification]::new($doc))
     } catch {
@@ -367,15 +392,25 @@ function Get-NextTimeOfDay {
 }
 
 function Test-PendingReboot {
+    <# Only reliable signals: Windows servicing / Windows Update flags, plus our own last run when it
+       reported a restart and the PC has not restarted since. PendingFileRenameOperations is ignored
+       on purpose - components like Xbox Gaming Services leave entries there permanently. #>
     $keys = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
     )
     foreach ($k in $keys) { if (Test-Path $k) { return $true } }
-    try {
-        $p = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction Stop
-        if ($p.PendingFileRenameOperations) { return $true }
-    } catch { }
+    $file = Join-Path $script:StateDir 'last-report.json'
+    if (Test-Path $file) {
+        try {
+            $r = Get-Content $file -Raw -Encoding UTF8 | ConvertFrom-Json
+            $items = @($r.Items | Where-Object { $_.RebootRequired -and $_.Status -eq 'Updated' })
+            if (-not $r.DryRun -and $items.Count -gt 0) {
+                $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+                if ([datetime]::Parse($r.EndedAt) -gt $boot) { return $true }
+            }
+        } catch { }
+    }
     return $false
 }
 
@@ -386,7 +421,7 @@ public static extern int SHQueryUserNotificationState(out int state);
 '@
 }
 
-$script:AppUserModelId = 'ALERION.Update'
+$script:AppUserModelId = $script:Product.AppUserModelId
 
 if (-not ('Alerion.ShellUtil' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -394,7 +429,7 @@ using System;
 using System.Runtime.InteropServices;
 namespace Alerion {
     // Gives the GUI process and its shortcuts one AppUserModelID, so the taskbar shows the
-    // ALERION icon (instead of grouping under powershell.exe) and pinned shortcut + window merge.
+    // app icon (instead of grouping under powershell.exe) and pinned shortcut + window merge.
     public static class ShellUtil {
         [DllImport("shell32.dll")] static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string id);
         [DllImport("shell32.dll")] static extern int SHGetPropertyStoreFromParsingName([MarshalAs(UnmanagedType.LPWStr)] string path, IntPtr bc, int flags, ref Guid iid, out IPropertyStore store);

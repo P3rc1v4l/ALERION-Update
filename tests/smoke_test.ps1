@@ -20,7 +20,7 @@ function Check {
     }
 }
 
-$env:ALERION_UPDATE_DATADIR = Join-Path ([IO.Path]::GetTempPath()) ("alerion-smoke-" + [guid]::NewGuid().ToString('N'))
+$env:UPDATECENTER_DATADIR = Join-Path ([IO.Path]::GetTempPath()) ("alerion-smoke-" + [guid]::NewGuid().ToString('N'))
 Write-Host 'ALERION Update smoke test' -ForegroundColor Cyan
 
 $scripts = Get-ChildItem $root -Recurse -Include *.ps1, *.psm1 | Where-Object { $_.FullName -notmatch '\\\.git\\' }
@@ -172,7 +172,7 @@ Check 'restart estimate is sane' {
 }
 Check 'next time of day is in the future' { (Get-NextTimeOfDay -Time '03:00') -gt (Get-Date) }Check 'icon assets exist' { (Test-Path (Join-Path $root 'assets\icon.ico')) -and (Test-Path (Join-Path $root 'assets\icon.png')) }
 
-Remove-Item $env:ALERION_UPDATE_DATADIR -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $env:UPDATECENTER_DATADIR -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 if ($failures.Count) { Write-Host "$($failures.Count) check(s) failed, $passed passed." -ForegroundColor Red; exit 1 }
 Write-Host "All $passed checks passed." -ForegroundColor Green

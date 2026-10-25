@@ -1,6 +1,34 @@
 # Changelog
 
-Alle relevanten Änderungen an ALERION Update. Format nach *Keep a Changelog*, Versionierung nach SemVer.
+Alle relevanten Änderungen an Update Center (bis v1.2.0 „ALERION Update“). Format nach *Keep a Changelog*, Versionierung nach SemVer.
+
+## [1.3.0] - 2026-10-25
+### Fixed
+- **Ausgewählte Updates wurden nicht installiert:** Windows PowerShell 5.1 las die Auswahlliste als *ein* Element
+  („Nothing selected to install“). Jetzt korrekt.
+- **„Es läuft bereits ein Vorgang“ + Sprung in den Verlauf direkt nach dem Klick:** Die Oberfläche las noch den
+  Status des vorigen Laufs. Sie wartet jetzt, bis der neue Lauf seinen Status geschrieben hat.
+- **Neustart-Hinweis trotz frischem Neustart:** `PendingFileRenameOperations` (z. B. dauerhaft von Xbox Gaming
+  Services belegt) wird nicht mehr ausgewertet; zusätzlich zählt der eigene letzte Lauf nur, wenn seitdem kein
+  Neustart war. winget-Ausgaben mit dem Wort „restart“ lösen keinen Neustart-Hinweis mehr aus.
+
+### Changed
+- **Neuer Name „Update Center“** (Fenster, Verknüpfungen, Startmenü, „Installierte Apps“, Aufgaben, Benachrichtigungen,
+  Bericht). Neue Pfade: `C:\Program Files\Update Center`, `C:\ProgramData\UpdateCenter`, Aufgaben unter `\UpdateCenter\`.
+  Bestehende „ALERION Update“-Installationen werden automatisch umgezogen (Einstellungen und Verlauf bleiben).
+- **Neues Logo** als App-, Desktop- und Taskleisten-Icon.
+- **Fenster:** nicht mehr transparent, kein Balken oben, Eckenradius wie die Seitenleiste, eigener Schatten.
+- **Einstellungen** werden erst mit „Speichern“ (mitlaufende Leiste) oder beim Wechsel in ein anderes Modul
+  gespeichert – mit Bestätigungs-Toast; „Verwerfen“ setzt zurück.
+- **Ausschließen-Symbol** neu gestaltet (eigenes Vektor-Auge, rot beim Überfahren, blau wenn ausgeschlossen).
+- Selbst-Updates führen danach den Installer aus (Verknüpfungen, Icon, Aufgaben werden mit aktualisiert).
+
+### Added
+- **Zeitwähler** für Uhrzeiten: Klick markiert den Inhalt, ein Feld mit scrollbaren Stunden/Minuten klappt aus.
+- **Mit Windows starten** (minimiert, ohne UAC-Abfrage).
+- **Testbenachrichtigung senden** und **Nach App-Update suchen** in den Einstellungen.
+- **Weitergabe:** `UpdateCenter-Setup-vX.Y.Z.exe` (Doppelklick) und Online-Installer `get.ps1`.
+- **Sicherheit:** wöchentlicher GitHub-Workflow (Sicherheitsregeln, Secret-Scan, Smoke-Test), `SECURITY.md`.
 
 ## [1.2.0] - 2026-10-25
 ### Added

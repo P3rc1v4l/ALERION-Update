@@ -1,4 +1,4 @@
-# ALERION Update - report rendering (JSON + self-contained HTML).
+# Update Center - report rendering (JSON + self-contained HTML).
 # Keep this file ASCII-only (Windows PowerShell 5.1).
 
 Set-StrictMode -Version 2.0
@@ -43,7 +43,7 @@ function ConvertTo-ReportHtml {
     @"
 <!doctype html>
 <html lang="$lang"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ALERION Update - $(& $e (T 'report.title'))</title>
+<title>Update Center - $(& $e (T 'report.title'))</title>
 <style>
 :root{--bg:#0d0f17;--card:#151826;--line:#262a3d;--text:#e8eaf3;--muted:#8b90a8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24;--info:#60a5fa;--acc1:#7c3aed;--acc2:#0a84ff}
 @media (prefers-color-scheme: light){:root{--bg:#f4f5fa;--card:#fff;--line:#e3e5ef;--text:#14172a;--muted:#5d6380}}
@@ -58,7 +58,7 @@ tr:last-child td{border-bottom:0}.id,.msg{color:var(--muted);font-size:12px}.v{f
 .src{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);white-space:nowrap}.st{font-weight:600}.st-Updated{color:var(--ok)}.st-Failed{color:var(--bad)}.st-Skipped,.st-Info{color:var(--muted)}.st-Available,.st-Triggered{color:var(--info)}
 .p{font-weight:600}.p-Critical{color:#ff453a}.p-Important{color:#ff9f0a}.p-Normal{color:#0a84ff}.p-Optional{color:var(--muted)}.tag{font-size:11px;background:rgba(251,191,36,.15);color:var(--warn);padding:1px 6px;border-radius:6px;margin-left:6px}footer{color:var(--muted);margin-top:16px;font-size:12px}a{color:var(--acc2)}
 </style></head><body><div class="wrap">
-<h1>ALERION Update</h1>
+<h1>Update Center</h1>
 <div class="meta">$(& $e (T 'report.title')) &middot; $(& $e $Report.Computer) &middot; $(& $e $started.ToString('g')) &middot; $(& $e (T 'report.duration')) $duration &middot; v$(& $e $Report.AppVersion)</div>
 $banner
 <div class="cards">
@@ -71,7 +71,7 @@ $banner
 <tbody>
 $($rows -join "`n")
 </tbody></table></div>
-<footer>Log: $(& $e $Report.LogFile) &middot; &copy; ALERION Studios</footer>
+<footer>Log: $(& $e $Report.LogFile)</footer>
 </div></body></html>
 "@
 }
