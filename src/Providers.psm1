@@ -612,9 +612,15 @@ function New-RestorePoint {
 # =====================================================================================
 
 function Invoke-SelfUpdate {
-    param([Parameter(Mandatory)][string]$Repo, [switch]$DryRun)
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [switch]$DryRun,
+        # Test hook: apply into this folder instead of the installed program folder.
+        [string]$TargetRoot
+    )
     $current = Get-AppVersion
     $paths = Get-AppPaths
+    $appRoot = if ($TargetRoot) { $TargetRoot } else { $paths.AppRoot }
     $headers = @{ 'User-Agent' = 'ALERION-Update'; 'Accept' = 'application/vnd.github+json' }
     try {
         $rel = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers -TimeoutSec 30
@@ -628,7 +634,7 @@ function Invoke-SelfUpdate {
     if ($tag -notmatch '^\d+\.\d+\.\d+$') { return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -Status Skipped -Message "invalid tag $($rel.tag_name)" }
     if ([version]$tag -le [version]$current) { return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -To $current -Status Info -Message 'msg.upToDate' }
     if ($DryRun) { return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -To $tag -Status Available }
-    if ($paths.AppRoot -notlike "$env:ProgramFiles*") {
+    if (-not $TargetRoot -and $appRoot -notlike "$env:ProgramFiles*") {
         return New-UpdateResult -Source 'self' -Name 'ALERION Update' -From $current -To $tag -Status Skipped -Message 'msg.selfUpdateDevMode'
     }
     $zipName = "ALERION-Update-v$tag.zip"
@@ -644,8 +650,9 @@ function Invoke-SelfUpdate {
     New-Item -ItemType Directory -Path $work -Force | Out-Null
     $zip = Join-Path $work $zipName
     Invoke-WebRequest -UseBasicParsing -Uri $zipAsset.browser_download_url -OutFile $zip -Headers $headers -TimeoutSec 300
-    $expected = ((Invoke-WebRequest -UseBasicParsing -Uri $shaAsset.browser_download_url -Headers $headers -TimeoutSec 60).Content -as [string])
-    if ($expected -is [byte[]]) { $expected = [Text.Encoding]::ASCII.GetString($expected) }
+    # GitHub serves release assets as application/octet-stream, so Content is a byte[] here.
+    $shaContent = (Invoke-WebRequest -UseBasicParsing -Uri $shaAsset.browser_download_url -Headers $headers -TimeoutSec 60).Content
+    $expected = if ($shaContent -is [byte[]]) { [Text.Encoding]::ASCII.GetString($shaContent) } else { [string]$shaContent }
     $expected = ($expected.Trim() -split '\s+')[0].ToLowerInvariant()
     $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($expected -ne $actual) { throw 'Self-update checksum mismatch, update rejected' }
@@ -658,7 +665,7 @@ function Invoke-SelfUpdate {
     if (-not (Test-Path (Join-Path $root 'src\UpdateEngine.ps1'))) { throw 'Self-update package is incomplete' }
     foreach ($item in @('src', 'assets', 'VERSION', 'Install.ps1', 'Uninstall.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md')) {
         $srcItem = Join-Path $root $item
-        $dstItem = Join-Path $paths.AppRoot $item
+        $dstItem = Join-Path $appRoot $item
         if (-not (Test-Path $srcItem)) { continue }
         if (Test-Path $srcItem -PathType Container) {
             # Copy the folder contents, not the folder itself (avoids src\src nesting).

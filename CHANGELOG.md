@@ -2,6 +2,11 @@
 
 Alle relevanten Änderungen an ALERION Update. Format nach *Keep a Changelog*, Versionierung nach SemVer.
 
+## [1.1.1] - 2026-10-25
+### Fixed
+- Selbst-Update: Die `.sha256`-Datei kommt von GitHub als Binärdaten; v1.1.0 hätte sie falsch gelesen und
+  jedes Update als „Prüfsumme falsch“ abgelehnt. Jetzt korrekt – end-to-end gegen das echte Release getestet.
+
 ## [1.1.0] - 2026-10-25
 ### Added
 - **Updates-Seite:** alle verfügbaren Updates als Liste mit Häkchen – einzelne oder ausgewählte Updates

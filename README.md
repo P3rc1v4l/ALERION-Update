@@ -1,6 +1,6 @@
 # ALERION Update
 
-> Programme, Treiber und Windows aktuell halten – alles auf einmal oder gezielt. · v1.1.0 · © ALERION Studios
+> Programme, Treiber und Windows aktuell halten – alles auf einmal oder gezielt. · v1.1.1 · © ALERION Studios
 
 ALERION Update ist ein Update-Tool für Windows 11. Es bündelt alles, was sonst einzeln
 gepflegt werden muss: **winget-Programme** (inkl. Stream Deck, OBS, Launcher …),
