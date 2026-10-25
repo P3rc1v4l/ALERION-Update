@@ -1,0 +1,29 @@
+# Secrets (never commit)
+.env
+*.key
+*.pfx
+
+# Internal documents - the repository is public (self-update source). These stay local /
+# in the Claude project knowledge: internal roadmap (security notes) and the full project
+# documentation (local paths, hardware).
+ROADMAP.md
+PROJECT_DOCUMENTATION.md
+
+# Build output
+*.zip
+*.zip.sha256
+dist/
+build/
+
+# Runtime data / logs (live in C:\ProgramData\ALERION\Update on the target PC)
+*.log
+logs/
+reports/
+state/
+cache/
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.vscode/
+.claude/

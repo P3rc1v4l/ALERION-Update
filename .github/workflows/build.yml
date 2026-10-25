@@ -1,0 +1,64 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "release = tag + GitHub release, draft = draft release, check-only = tests only"
+        required: true
+        default: release
+        type: choice
+        options: [release, draft, check-only]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Smoke test (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\smoke_test.ps1
+
+      - name: Lint (PSScriptAnalyzer, errors only)
+        shell: powershell
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $issues = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error
+          $issues | Format-Table -AutoSize
+          if ($issues) { throw "PSScriptAnalyzer found $($issues.Count) error(s)" }
+
+      - name: Package
+        if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'
+        id: pkg
+        shell: powershell
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $name = "ALERION-Update-v$version"
+          $stage = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory $stage | Out-Null
+          $items = 'src','assets','tools','tests','.github','VERSION','LICENSE','README.md','CHANGELOG.md','ROADMAP.md','ROADMAP_PUBLIC.md',
+                   'PROJECT_DOCUMENTATION.md','PROMPT_OPTIMIERT.md','Install.ps1','Install.cmd','Uninstall.ps1','.gitignore'
+          foreach ($i in $items) { if (Test-Path $i) { Copy-Item $i -Destination $stage -Recurse } }
+          $zip = "$name.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip
+          # The .sha256 file is required by the in-app self-update.
+          (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip" | Out-File "$zip.sha256" -Encoding ascii
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub release
+        if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $v = "v${{ steps.pkg.outputs.version }}"
+          $flags = @()
+          if ('${{ inputs.build_type }}' -eq 'draft') { $flags += '--draft' }
+          gh release create $v "${{ steps.pkg.outputs.zip }}" "${{ steps.pkg.outputs.zip }}.sha256" --title "ALERION Update $v" --notes-file CHANGELOG.md @flags

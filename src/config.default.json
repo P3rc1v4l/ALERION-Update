@@ -1,0 +1,38 @@
+{
+  "SchemaVersion": 2,
+  "Language": "auto",
+  "Mode": "Visible",
+  "Parallel": true,
+  "Reboot": "Prompt",
+  "RestorePoint": true,
+  "Schedule": {
+    "Type": "Weekly",
+    "Time": "18:00",
+    "DayOfWeek": "Sunday",
+    "DayOfMonth": 1,
+    "WakeToRun": false
+  },
+  "ScheduleAction": "Install",
+  "AutoInstallPriorities": ["Critical", "Important", "Normal"],
+  "Sources": {
+    "Winget": true,
+    "WingetIncludeUnknown": true,
+    "Chocolatey": true,
+    "Store": true,
+    "WindowsUpdate": true,
+    "WindowsUpdateDrivers": true,
+    "MicrosoftUpdate": true,
+    "Nvidia": true,
+    "Defender": true,
+    "Office": true
+  },
+  "ExcludedPackages": [],
+  "WaitWhileBusyMinutes": 240,
+  "MinBatteryPercent": 40,
+  "MinFreeSpaceGB": 10,
+  "LogRetentionDays": 60,
+  "SelfUpdate": {
+    "Enabled": true,
+    "Repo": "P3rc1v4l/ALERION-Update"
+  }
+}
