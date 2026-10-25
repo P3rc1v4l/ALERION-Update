@@ -2,6 +2,26 @@
 
 Alle relevanten Änderungen an ALERION Update. Format nach *Keep a Changelog*, Versionierung nach SemVer.
 
+## [1.2.0] - 2026-10-25
+### Added
+- **Neustart-Optionen:** Nachfragen · sofort automatisch (2 Min. Vorwarnung) · zu fester Uhrzeit (einmalige Aufgabe
+  „ALERION Restart“, läuft als SYSTEM, wird nicht nachgeholt, löscht sich selbst) · nie.
+- **Dauer-Schätzung** für den Neustart, gemessen aus den letzten Neustarts dieses PCs (Ereignisprotokoll 6006 → 6005)
+  plus Zuschlag, wenn Windows Updates einrichtet. Angezeigt im Dialog, im Banner, in den Einstellungen und im Bericht.
+- **In-App-Dialoge** im App-Design statt Windows-Meldungsfenster (Neustart, „läuft bereits“, Fehler), mit
+  „Jetzt neu starten“, „Zu Uhrzeit neu starten“, „Neustart abbrechen“, „Später“.
+- Neues **Logo** (transparent, Taskleiste/Desktop/Startmenü/App); `tools/make_icon.py` erzeugt alle Größen aus der Vorlage.
+
+### Changed
+- **Komplett neues Design „Glass“:** echtes Acrylic-Glas-Fenster (Windows 11), schwebende Seitenleiste mit farbigen
+  Symbol-Kacheln, gruppierte Listen im Apple-Stil, Logo-Farbverlauf (Cyan → Blau → Violett), schwebende Aktionsleiste,
+  Einstellungen als Zeilen-Gruppen, „Gespeichert“-Hinweis als Pille.
+- **Eigene Fensterknöpfe** oben rechts in einer Kapsel (weder Apple noch Windows), Schließen mit rotem Glühen.
+- Layout in `src/Gui.xaml` ausgelagert.
+
+### Removed
+- Alter Icon-Generator `tools/New-Icon.ps1` (ersetzt durch das echte Logo).
+
 ## [1.1.1] - 2026-10-25
 ### Fixed
 - Selbst-Update: Die `.sha256`-Datei kommt von GitHub als Binärdaten; v1.1.0 hätte sie falsch gelesen und

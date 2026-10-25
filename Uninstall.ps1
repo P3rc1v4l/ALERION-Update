@@ -17,7 +17,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 $target = Join-Path $env:ProgramFiles 'ALERION Update'
-foreach ($n in @('ALERION Update', 'ALERION Update GUI')) {
+foreach ($n in @('ALERION Update', 'ALERION Update GUI', 'ALERION Restart')) {
     Unregister-ScheduledTask -TaskPath '\ALERION\' -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue
 }
 foreach ($lnk in @((Join-Path ([Environment]::GetFolderPath('Desktop')) 'ALERION Update.lnk'),

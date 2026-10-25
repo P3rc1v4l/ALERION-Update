@@ -16,10 +16,10 @@
 - Eigene Prioritäten pro Programm festlegen
 
 ## ✅ Recently Shipped
+- v1.2.0: Neues Glas-Design und eigenes Logo
+- Neustart sofort, zur Wunschzeit oder auf Nachfrage – mit Dauer
 - v1.1.0: Updates einzeln auswählen und installieren
-- Prioritäten: Kritisch, Wichtig, Normal, Optional
-- Suche über Updates und alle installierten Programme
-- Neues Design mit runden Ecken, Ausschließen per Klick
+- Prioritäten, Suche und Ausschließen per Klick
 
 ---
 <!--

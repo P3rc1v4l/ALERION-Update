@@ -1,6 +1,6 @@
 # ALERION Update
 
-> Programme, Treiber und Windows aktuell halten – alles auf einmal oder gezielt. · v1.1.1 · © ALERION Studios
+> Programme, Treiber und Windows aktuell halten – alles auf einmal oder gezielt. · v1.2.0 · © ALERION Studios
 
 ALERION Update ist ein Update-Tool für Windows 11. Es bündelt alles, was sonst einzeln
 gepflegt werden muss: **winget-Programme** (inkl. Stream Deck, OBS, Launcher …),
@@ -21,9 +21,11 @@ einen Bericht: *was* von *welcher Version* auf *welche* aktualisiert wurde und o
 | Automatik | Nur manuell · täglich · wöchentlich · alle 2 Wochen · monatlich; „Installieren“ (wählbare Prioritäten) oder „Nur benachrichtigen“ |
 | Sichtbar oder unsichtbar | Fenster mit Fortschritt **oder** komplett im Hintergrund + Windows-Benachrichtigung |
 | Parallel | Suche und Downloads gleichzeitig, Installationen nacheinander (Windows Installer erlaubt nur eine) |
+| Neustart | Nachfragen (In-App-Dialog) · sofort automatisch · zu fester Uhrzeit · nie – mit geschätzter Dauer, gemessen auf deinem PC |
 | Verlauf | Alle Berichte in der App + als HTML, Neustart-Hinweis, Logs 60 Tage |
 | Sicherheit | Wiederherstellungspunkt, signaturgeprüfte Treiber, geschützte Ordner, Spiele-Schutz, Abbrechen jederzeit |
 | Selbst-Update | winget/Chocolatey/Windows immer; das Tool selbst optional über GitHub-Releases (SHA-256-geprüft) |
+| Design | Glas-Fenster mit runden Ecken (Windows 11), eigene Fensterknöpfe, dunkles Apple-inspiriertes Design |
 | Sprachen | Deutsch / Englisch |
 
 ## 🔧 Installation

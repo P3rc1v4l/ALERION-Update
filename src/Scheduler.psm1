@@ -120,6 +120,58 @@ function Register-ScheduleTask {
     Register-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskSchedule -Xml $xml -Force | Out-Null
 }
 
+$script:TaskRestart = 'ALERION Restart'
+
+function Register-RestartTask {
+    <# One-time restart at the given time. Runs as SYSTEM (works while locked), warns 2 minutes ahead
+       (cancel: shutdown /a), is NOT caught up when the PC was off and deletes itself afterwards. #>
+    param([Parameter(Mandatory)][datetime]$At, [string]$Message = 'ALERION Update: restart to finish updates')
+    $fmt = 'yyyy-MM-ddTHH:mm:ss'
+    $shutdown = Join-Path $env:WINDIR 'System32\shutdown.exe'
+    $xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Author>ALERION Studios</Author><Description>One-time restart planned by ALERION Update.</Description></RegistrationInfo>
+  <Triggers><TimeTrigger><StartBoundary>$($At.ToString($fmt))</StartBoundary><EndBoundary>$($At.AddHours(1).ToString($fmt))</EndBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <DeleteExpiredTaskAfter>PT1M</DeleteExpiredTaskAfter>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>$(ConvertTo-XmlText $shutdown)</Command><Arguments>$(ConvertTo-XmlText ("/r /t 120 /c `"$Message`""))</Arguments></Exec></Actions>
+</Task>
+"@
+    Register-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskRestart -Xml $xml -Force | Out-Null
+}
+
+function Get-PlannedRestart {
+    <# Returns the planned restart time or $null. #>
+    try {
+        $t = Get-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskRestart -ErrorAction Stop
+        $at = [datetime]$t.Triggers[0].StartBoundary
+        if ($at -gt (Get-Date)) { return $at }
+    } catch { }
+    return $null
+}
+
+function Unregister-RestartTask {
+    Unregister-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskRestart -Confirm:$false -ErrorAction SilentlyContinue
+}
+
+function Invoke-RestartNow {
+    <# Short countdown so open documents can still be saved; cancel with shutdown /a. #>
+    param([int]$Seconds = 15, [string]$Message = 'ALERION Update')
+    Unregister-RestartTask
+    & (Join-Path $env:WINDIR 'System32\shutdown.exe') /r /t $Seconds /c $Message
+}
+
 function Get-NextRun {
     try {
         $info = Get-ScheduledTaskInfo -TaskPath $script:TaskPath -TaskName $script:TaskSchedule -ErrorAction Stop
@@ -133,7 +185,7 @@ function Test-GuiTask {
 }
 
 function Unregister-AllTasks {
-    foreach ($n in @($script:TaskSchedule, $script:TaskGui)) {
+    foreach ($n in @($script:TaskSchedule, $script:TaskGui, 'ALERION Restart')) {
         Unregister-ScheduledTask -TaskPath $script:TaskPath -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue
     }
 }

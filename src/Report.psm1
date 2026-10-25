@@ -32,6 +32,12 @@ function ConvertTo-ReportHtml {
     $ended = [datetime]::Parse($Report.EndedAt)
     $duration = '{0:hh\:mm\:ss}' -f ($ended - $started)
     $banner = if ($Report.RebootRequired) { "<div class='banner warn'>$(& $e (T 'report.rebootRequired'))</div>" } else { "<div class='banner ok'>$(& $e (T 'report.noReboot'))</div>" }
+    if ($Report.PSObject.Properties.Name -contains 'RestartPlan' -and $Report.RestartPlan) {
+        $p = $Report.RestartPlan
+        $line = T 'restart.duration' @(Format-RestartEstimate -Estimate $p)
+        if ($p.At) { $line = (T 'restart.plannedAt' @(([datetime]$p.At).ToString('g'))) + ' &middot; ' + $line }
+        $banner += "<div class='banner info'>$line</div>"
+    }
     if ($Report.DryRun) { $banner = "<div class='banner info'>$(& $e (T 'report.dryRun'))</div>" + $banner }
     $lang = Get-CurrentLanguage
     @"

@@ -140,7 +140,8 @@ function Test-Config {
     $errors = New-Object System.Collections.Generic.List[string]
     if ($Config.Language -notin @('de', 'en')) { $errors.Add("Language must be 'de' or 'en'") }
     if ($Config.Mode -notin @('Visible', 'Silent')) { $errors.Add("Mode must be 'Visible' or 'Silent'") }
-    if ($Config.Reboot -notin @('Never', 'Prompt', 'Auto')) { $errors.Add("Reboot must be Never, Prompt or Auto") }
+    if ($Config.Reboot -notin @('Never', 'Prompt', 'Auto', 'Scheduled')) { $errors.Add("Reboot must be Never, Prompt, Auto or Scheduled") }
+    if ($Config.RebootTime -notmatch '^([01]\d|2[0-3]):[0-5]\d$') { $errors.Add("RebootTime must be HH:mm") }
     if ($Config.Schedule.Type -notin @('Manual', 'Daily', 'Weekly', 'BiWeekly', 'Monthly')) { $errors.Add("Schedule.Type invalid") }
     if ($Config.Schedule.Time -notmatch '^([01]\d|2[0-3]):[0-5]\d$') { $errors.Add("Schedule.Time must be HH:mm") }
     if ($Config.Schedule.DayOfWeek -notin [Enum]::GetNames([DayOfWeek])) { $errors.Add("Schedule.DayOfWeek invalid") }
@@ -321,6 +322,50 @@ function Show-Toast {
 }
 
 # ---------------------------------------------------------------- system state helpers
+function Get-RestartEstimate {
+    <# Estimates how long a restart takes on THIS PC from past restarts (System log: 6006 "event log
+       stopped" -> 6005 "started"; gaps over 15 min are shutdowns, not restarts) plus time for closing
+       apps / sign-in. When Windows has to finish installing updates during the restart, 2-7 minutes
+       are added. Returns minutes as a range. #>
+    param([bool]$WithUpdates = $false)
+    $samples = @()
+    try {
+        $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 6005, 6006 } -MaxEvents 40 -ErrorAction Stop | Sort-Object TimeCreated)
+        for ($i = 1; $i -lt $ev.Count; $i++) {
+            if ($ev[$i].Id -eq 6005 -and $ev[$i - 1].Id -eq 6006) {
+                $gap = ($ev[$i].TimeCreated - $ev[$i - 1].TimeCreated).TotalSeconds
+                if ($gap -gt 5 -and $gap -lt 900) { $samples += $gap }
+            }
+        }
+    } catch { }
+    $measured = $samples.Count -gt 0
+    $base = if ($measured) { ($samples | Sort-Object)[[int][Math]::Floor($samples.Count / 2)] } else { 75 }
+    $base += 35   # closing apps before 6006 + sign-in after 6005
+    $min = $base * 0.85; $max = $base * 1.4
+    if ($WithUpdates) { $min += 120; $max += 420 }
+    [pscustomobject]@{
+        MinMinutes = [int][Math]::Max(1, [Math]::Round($min / 60))
+        MaxMinutes = [int][Math]::Max(1, [Math]::Ceiling($max / 60))
+        Measured   = $measured
+        Samples    = $samples.Count
+        WithUpdates = $WithUpdates
+    }
+}
+
+function Format-RestartEstimate {
+    param([Parameter(Mandatory)]$Estimate)
+    if ($Estimate.MinMinutes -ge $Estimate.MaxMinutes) { return (T 'restart.estimateOne' @($Estimate.MaxMinutes)) }
+    return (T 'restart.estimate' @($Estimate.MinMinutes, $Estimate.MaxMinutes))
+}
+
+function Get-NextTimeOfDay {
+    param([Parameter(Mandatory)][string]$Time)
+    $t = [datetime]::ParseExact($Time, 'HH:mm', $null)
+    $at = (Get-Date).Date.AddHours($t.Hour).AddMinutes($t.Minute)
+    if ($at -le (Get-Date).AddMinutes(2)) { $at = $at.AddDays(1) }
+    return $at
+}
+
 function Test-PendingReboot {
     $keys = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
@@ -374,13 +419,17 @@ namespace Alerion {
 
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         // Windows 11: rounded corners + dark frame for our borderless window (no-op on Windows 10).
-        public static void StyleWindow(IntPtr hwnd) {
+        // Returns true when the blurred "acrylic" backdrop is active (Windows 11 22H2+).
+        public static bool StyleWindow(IntPtr hwnd) {
             int round = 2;  /* DWMWCP_ROUND */
             DwmSetWindowAttribute(hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, ref round, 4);
             int dark = 1;
             DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, ref dark, 4);
-            int border = 0x00362D2A; /* COLORREF 0x00BBGGRR = #2A2D36, subtle frame */
+            int border = 0x00453A33; /* COLORREF 0x00BBGGRR = #333A45, subtle frame */
             DwmSetWindowAttribute(hwnd, 34 /* DWMWA_BORDER_COLOR */, ref border, 4);
+            int backdrop = 3; /* DWMSBT_TRANSIENTWINDOW = acrylic */
+            return DwmSetWindowAttribute(hwnd, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, ref backdrop, 4) == 0
+                && System.Environment.OSVersion.Version.Build >= 22621;
         }
 
         public static void SetShortcutAppId(string lnkPath, string id) {

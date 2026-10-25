@@ -157,14 +157,20 @@ Check 'report HTML renders' {
 
 Check 'GUI XAML loads' {
     Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
+    $w = [Windows.Markup.XamlReader]::Parse((Get-Content (Join-Path $src 'Gui.xaml') -Raw -Encoding UTF8))
+    $names = @([regex]::Matches((Get-Content (Join-Path $src 'Gui.xaml') -Raw), 'x:Name="([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
     $gui = Get-Content (Join-Path $src 'Gui.ps1') -Raw
-    $m = [regex]::Match($gui, "\[xml\]\`$xaml = @'\r?\n(.*?)\r?\n'@", 'Singleline')
-    if (-not $m.Success) { throw 'XAML block not found' }
-    $w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml]$m.Groups[1].Value)))
-    ($null -ne $w.FindName('BtnRecommended')) -and ($null -ne $w.FindName('UpdateList')) -and ($null -ne $w.FindName('NavSettings'))
+    # every $ui.Name used by the code must exist in the XAML
+    $used = [regex]::Matches($gui, '\$ui\.([A-Za-z0-9]+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+    $missing = @($used | Where-Object { $names -notcontains $_ })
+    if ($missing) { throw "XAML lacks: $($missing -join ', ')" }
+    ($null -ne $w.FindName('DialogLayer')) -and ($null -ne $w.FindName('BtnClose'))
 }
-
-Check 'icon assets exist' { (Test-Path (Join-Path $root 'assets\icon.ico')) -and (Test-Path (Join-Path $root 'assets\icon.png')) }
+Check 'restart estimate is sane' {
+    $e = Get-RestartEstimate -WithUpdates $false; $u = Get-RestartEstimate -WithUpdates $true
+    ($e.MinMinutes -ge 1) -and ($e.MaxMinutes -ge $e.MinMinutes) -and ($u.MaxMinutes -gt $e.MaxMinutes) -and ((Format-RestartEstimate -Estimate $e) -match '\d')
+}
+Check 'next time of day is in the future' { (Get-NextTimeOfDay -Time '03:00') -gt (Get-Date) }Check 'icon assets exist' { (Test-Path (Join-Path $root 'assets\icon.ico')) -and (Test-Path (Join-Path $root 'assets\icon.png')) }
 
 Remove-Item $env:ALERION_UPDATE_DATADIR -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''

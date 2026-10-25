@@ -4,6 +4,7 @@
   "Mode": "Visible",
   "Parallel": true,
   "Reboot": "Prompt",
+  "RebootTime": "03:00",
   "RestorePoint": true,
   "Schedule": {
     "Type": "Weekly",

@@ -393,7 +393,35 @@ finally {
         try {
             $items = $results.ToArray()   # @(List) inside a hashtable literal throws in PS 5.1
             $rebootNeeded = (@($items | Where-Object { $_.RebootRequired -and $_.Status -eq 'Updated' }).Count -gt 0) -or ((-not $scanOnly) -and (Test-PendingReboot))
+
+            # ---------------------------------------------------------- restart plan
+            $restartPlan = $null
+            if (-not $scanOnly -and $rebootNeeded -and $config) {
+                Import-Module (Join-Path $src 'Scheduler.psm1') -DisableNameChecking -Force
+                $servicing = (@($items | Where-Object { $_.Source -eq 'windows' -and $_.Status -eq 'Updated' }).Count -gt 0) -or
+                             (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending')
+                $est = Get-RestartEstimate -WithUpdates $servicing
+                $at = $null
+                switch ($config.Reboot) {
+                    'Auto' {
+                        $at = (Get-Date).AddMinutes(2)
+                        Invoke-RestartNow -Seconds 120 -Message (T 'toast.autoReboot')
+                        Write-Log -Message 'Automatic restart in 2 minutes (cancel with: shutdown /a)'
+                    }
+                    'Scheduled' {
+                        $at = Get-NextTimeOfDay -Time $config.RebootTime
+                        Register-RestartTask -At $at -Message (T 'toast.plannedRebootNow')
+                        Write-Log -Message "Restart planned for $($at.ToString('g'))"
+                    }
+                }
+                $restartPlan = [pscustomobject]@{
+                    Mode = $config.Reboot; At = $(if ($at) { $at.ToString('o') } else { $null })
+                    MinMinutes = $est.MinMinutes; MaxMinutes = $est.MaxMinutes; WithUpdates = $est.WithUpdates
+                }
+            }
+
             $report = [pscustomobject]@{
+                RestartPlan    = $restartPlan
                 AppVersion     = Get-AppVersion
                 Computer       = $env:COMPUTERNAME
                 StartedAt      = $startedAt
@@ -415,14 +443,13 @@ finally {
             $reportPath = Save-Report -Report $report
             Write-Log -Level OK -Message ("Finished: {0} updated, {1} failed, {2} skipped, reboot={3}" -f $report.Counts.Updated, $report.Counts.Failed, $report.Counts.Skipped, $rebootNeeded)
 
-            if (-not $scanOnly -and $rebootNeeded -and $config -and $config.Reboot -eq 'Auto') {
-                & "$env:WINDIR\System32\shutdown.exe" /r /t 600 /c (T 'toast.autoReboot')
-                Write-Log -Message 'Automatic restart scheduled in 10 minutes (cancel with: shutdown /a)'
-            }
             # The GUI shows its own summary; silent runs get a toast that opens the HTML report.
             if ($mode -eq 'Silent' -and -not $FromGui -and -not $scanOnly) {
                 $title = if ($rebootNeeded) { T 'toast.titleReboot' } else { T 'toast.title' }
                 $body = T 'toast.body' @($report.Counts.Updated, $report.Counts.Failed)
+                if ($restartPlan -and $restartPlan.At) {
+                    $body += ' ' + (T 'toast.restartAt' @(([datetime]$restartPlan.At).ToString('HH:mm'), (Format-RestartEstimate -Estimate $restartPlan)))
+                }
                 Show-Toast -Title $title -Body $body -LaunchUri ([uri]$reportPath.Html).AbsoluteUri
             }
         } catch {

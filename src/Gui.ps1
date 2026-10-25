@@ -1,16 +1,24 @@
 <#
 .SYNOPSIS
     ALERION Update - WPF user interface (overview, update list with search/selection, history, settings).
+    Layout and styles live in Gui.xaml; this file wires up data and behaviour.
 .PARAMETER Monitor
     Opened by a scheduled run: shows the progress of the already running engine.
+.PARAMETER Snapshot
+    Development aid: renders a page to a PNG off-screen and exits (design checks / docs).
+.PARAMETER Preview
+    Development aid: shows the window without admin rights and without starting the engine.
 #>
 [CmdletBinding()]
 param(
     [switch]$Monitor,
-    # Development aid: renders a page to a PNG off-screen and exits (used for design checks / docs).
     [string]$Snapshot,
+    [switch]$Preview,
     [ValidateSet('Overview', 'Updates', 'History', 'Settings')][string]$Page = 'Overview',
-    [string]$Query
+    [string]$Query,
+    [ValidateSet('', 'Restart', 'Info')][string]$Dialog = '',
+    [int]$X = -1,
+    [int]$Y = -1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,9 +41,10 @@ $src = $PSScriptRoot
 Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Report.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Scheduler.psm1') -DisableNameChecking -Force
+$devMode = [bool]($Snapshot -or $Preview)
 
 # ------------------------------------------------------------------ elevation
-if (-not (Test-IsAdmin) -and -not $Snapshot) {
+if (-not (Test-IsAdmin) -and -not $devMode) {
     # Normally never reached: the shortcut starts the elevated GUI task. Fallback for manual starts.
     $names = Get-TaskNames
     if (Test-GuiTask) {
@@ -50,7 +59,7 @@ if (-not (Test-IsAdmin) -and -not $Snapshot) {
 # ------------------------------------------------------------------ single window
 $showEvent = New-Object System.Threading.EventWaitHandle($false, 'AutoReset', 'Local\ALERION-Update-GUI-Show')
 $guiMutex = New-Object System.Threading.Mutex($false, 'Local\ALERION-Update-GUI')
-if (-not $Snapshot -and -not $guiMutex.WaitOne(0)) { [void]$showEvent.Set(); exit 0 }
+if (-not $devMode -and -not $guiMutex.WaitOne(0)) { [void]$showEvent.Set(); exit 0 }
 
 if (-not ('Alerion.UpdateRow' -as [type])) {
     Add-Type -TypeDefinition (Get-Content (Join-Path $src 'GuiModel.cs') -Raw)
@@ -63,543 +72,36 @@ Import-I18n -Language $config.Language
 $paths = Get-AppPaths
 $version = Get-AppVersion
 
-# ------------------------------------------------------------------ XAML
-[xml]$xaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:sys="clr-namespace:System;assembly=mscorlib"
-        Title="ALERION Update" Width="1180" Height="760" MinWidth="980" MinHeight="620"
-        WindowStartupLocation="CenterScreen" Background="#111318" Foreground="#F2F3F5"
-        FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13.5" WindowStyle="None" ResizeMode="CanResize"
-        TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
-  <WindowChrome.WindowChrome>
-    <WindowChrome CaptionHeight="40" ResizeBorderThickness="6" CornerRadius="12" GlassFrameThickness="0" UseAeroCaptionButtons="False"/>
-  </WindowChrome.WindowChrome>
-  <Window.Resources>
-    <sys:String x:Key="SelectAllText">Select all</sys:String>
-    <SolidColorBrush x:Key="Card" Color="#1A1D24"/>
-    <SolidColorBrush x:Key="CardHover" Color="#20242C"/>
-    <SolidColorBrush x:Key="Line" Color="#262A33"/>
-    <SolidColorBrush x:Key="Muted" Color="#8E949F"/>
-    <SolidColorBrush x:Key="Blue" Color="#0A84FF"/>
-    <LinearGradientBrush x:Key="Accent" StartPoint="0,0" EndPoint="1,1">
-      <GradientStop Color="#7C3AED" Offset="0"/><GradientStop Color="#0A84FF" Offset="1"/>
-    </LinearGradientBrush>
-    <FontFamily x:Key="Icons">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
-    <FontFamily x:Key="Display">Segoe UI Variable Display, Segoe UI</FontFamily>
-
-    <Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="NoWrap"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/></Style>
-
-    <Style x:Key="Primary" TargetType="Button">
-      <Setter Property="Foreground" Value="White"/><Setter Property="FontWeight" Value="SemiBold"/>
-      <Setter Property="Padding" Value="20,9"/><Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-        <Border x:Name="b" CornerRadius="10" Background="{StaticResource Blue}" Padding="{TemplateBinding Padding}">
-          <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
-        <ControlTemplate.Triggers>
-          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#2B95FF"/></Trigger>
-          <Trigger Property="IsPressed" Value="True"><Setter TargetName="b" Property="Background" Value="#0070E0"/></Trigger>
-          <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.35"/></Trigger>
-        </ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style x:Key="Secondary" TargetType="Button">
-      <Setter Property="Foreground" Value="#F2F3F5"/><Setter Property="Padding" Value="16,9"/><Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-        <Border x:Name="b" CornerRadius="10" Background="#262A33" Padding="{TemplateBinding Padding}">
-          <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
-        <ControlTemplate.Triggers>
-          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#30343E"/></Trigger>
-          <Trigger Property="IsEnabled" Value="False"><Setter TargetName="b" Property="Opacity" Value="0.4"/></Trigger>
-        </ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style x:Key="Ghost" TargetType="Button">
-      <Setter Property="Foreground" Value="#8E949F"/><Setter Property="Padding" Value="8,4"/><Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-        <Border x:Name="b" CornerRadius="8" Background="Transparent" Padding="{TemplateBinding Padding}">
-          <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
-        <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#2A2E38"/><Setter Property="Foreground" Value="#F2F3F5"/></Trigger></ControlTemplate.Triggers>
-      </ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style x:Key="Light" TargetType="Button">
-      <Setter Property="Width" Value="12"/><Setter Property="Height" Value="12"/><Setter Property="Margin" Value="0,0,8,0"/><Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-        <Grid><Ellipse Fill="{TemplateBinding Background}"/>
-          <TextBlock x:Name="g" Text="{TemplateBinding Content}" FontFamily="{StaticResource Icons}" FontSize="7" Foreground="#5A1A12" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Hidden"/></Grid>
-        <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="g" Property="Visibility" Value="Visible"/></Trigger></ControlTemplate.Triggers>
-      </ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style x:Key="Nav" TargetType="RadioButton">
-      <Setter Property="Foreground" Value="#C7CBD3"/><Setter Property="Margin" Value="0,1"/><Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
-        <Border x:Name="b" CornerRadius="8" Padding="10,8" Background="Transparent"><ContentPresenter/></Border>
-        <ControlTemplate.Triggers>
-          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#22252D"/></Trigger>
-          <Trigger Property="IsChecked" Value="True"><Setter TargetName="b" Property="Background" Value="#2A2E38"/><Setter Property="Foreground" Value="White"/></Trigger>
-        </ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style x:Key="Segment" TargetType="RadioButton">
-      <Setter Property="Foreground" Value="#C7CBD3"/><Setter Property="Cursor" Value="Hand"/><Setter Property="FontSize" Value="12.5"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
-        <Border x:Name="b" CornerRadius="7" Padding="12,5" Background="Transparent"><ContentPresenter HorizontalAlignment="Center"/></Border>
-        <ControlTemplate.Triggers>
-          <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="White"/></Trigger>
-          <Trigger Property="IsChecked" Value="True"><Setter TargetName="b" Property="Background" Value="#3A3F4B"/><Setter Property="Foreground" Value="White"/></Trigger>
-        </ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style x:Key="SegmentBar" TargetType="Border">
-      <Setter Property="Background" Value="#1F2229"/><Setter Property="CornerRadius" Value="9"/><Setter Property="Padding" Value="2"/><Setter Property="HorizontalAlignment" Value="Left"/>
-    </Style>
-    <Style x:Key="Toggle" TargetType="CheckBox">
-      <Setter Property="Foreground" Value="#F2F3F5"/><Setter Property="Margin" Value="0,7"/><Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="CheckBox">
-        <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <ContentPresenter VerticalAlignment="Center" Margin="0,0,16,0"/>
-          <Border x:Name="track" Grid.Column="1" Width="38" Height="22" CornerRadius="11" Background="#3A3F4B">
-            <Ellipse x:Name="knob" Width="18" Height="18" Fill="White" HorizontalAlignment="Left" Margin="2,0"/></Border></Grid>
-        <ControlTemplate.Triggers>
-          <Trigger Property="IsChecked" Value="True"><Setter TargetName="track" Property="Background" Value="#30D158"/><Setter TargetName="knob" Property="HorizontalAlignment" Value="Right"/></Trigger>
-          <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
-        </ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style x:Key="Tick" TargetType="CheckBox">
-      <Setter Property="Foreground" Value="#F2F3F5"/><Setter Property="Cursor" Value="Hand"/><Setter Property="VerticalAlignment" Value="Center"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="CheckBox">
-        <StackPanel Orientation="Horizontal">
-          <Border x:Name="box" Width="18" Height="18" CornerRadius="5" BorderBrush="#4A505C" BorderThickness="1.5" Background="Transparent">
-            <TextBlock x:Name="mark" Text="&#xE73E;" FontFamily="{StaticResource Icons}" FontSize="11" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Hidden"/></Border>
-          <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"/></StackPanel>
-        <ControlTemplate.Triggers>
-          <Trigger Property="IsChecked" Value="True"><Setter TargetName="box" Property="Background" Value="#0A84FF"/><Setter TargetName="box" Property="BorderBrush" Value="#0A84FF"/><Setter TargetName="mark" Property="Visibility" Value="Visible"/></Trigger>
-          <Trigger Property="IsEnabled" Value="False"><Setter TargetName="box" Property="Opacity" Value="0.25"/></Trigger>
-        </ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style TargetType="TextBox">
-      <Setter Property="Background" Value="#1F2229"/><Setter Property="Foreground" Value="#F2F3F5"/><Setter Property="CaretBrush" Value="White"/>
-      <Setter Property="Padding" Value="10,0"/><Setter Property="Height" Value="34"/><Setter Property="SelectionBrush" Value="#0A84FF"/><Setter Property="VerticalContentAlignment" Value="Center"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TextBox">
-        <Border x:Name="b" CornerRadius="9" Background="{TemplateBinding Background}" BorderBrush="#2E323C" BorderThickness="1">
-          <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"/></Border>
-        <ControlTemplate.Triggers><Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#0A84FF"/></Trigger></ControlTemplate.Triggers>
-      </ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style TargetType="ComboBoxItem">
-      <Setter Property="Foreground" Value="#F2F3F5"/><Setter Property="Padding" Value="10,6"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBoxItem">
-        <Border x:Name="b" CornerRadius="6" Padding="{TemplateBinding Padding}" Background="Transparent"><ContentPresenter/></Border>
-        <ControlTemplate.Triggers>
-          <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="b" Property="Background" Value="#0A84FF"/></Trigger>
-        </ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style TargetType="ComboBox">
-      <Setter Property="Foreground" Value="#F2F3F5"/><Setter Property="MinWidth" Value="200"/><Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox">
-        <Grid>
-          <ToggleButton IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" Focusable="False">
-            <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
-              <Border CornerRadius="9" Background="#1F2229" BorderBrush="#2E323C" BorderThickness="1">
-                <TextBlock Text="&#xE70D;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="9" Foreground="#8E949F" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0"/></Border>
-            </ControlTemplate></ToggleButton.Template></ToggleButton>
-          <ContentPresenter IsHitTestVisible="False" Margin="12,7,30,7" VerticalAlignment="Center"
-            Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"/>
-          <Popup IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-            <Border Background="#24272F" BorderBrush="#343844" BorderThickness="1" CornerRadius="10" Padding="4" Margin="0,4,0,0"
-                    MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" MaxHeight="320">
-              <ScrollViewer><ItemsPresenter/></ScrollViewer></Border></Popup>
-        </Grid></ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style TargetType="ScrollBar">
-      <Setter Property="Width" Value="8"/><Setter Property="MinWidth" Value="8"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
-        <Track x:Name="PART_Track" IsDirectionReversed="True"><Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType="Thumb">
-          <Border CornerRadius="4" Background="#3A3F4B" Margin="1"/></ControlTemplate></Thumb.Template></Thumb></Track.Thumb></Track>
-      </ControlTemplate></Setter.Value></Setter>
-      <Style.Triggers><Trigger Property="Orientation" Value="Horizontal"><Setter Property="Height" Value="8"/><Setter Property="Width" Value="Auto"/>
-        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
-          <Track x:Name="PART_Track"><Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType="Thumb">
-            <Border CornerRadius="4" Background="#3A3F4B" Margin="1"/></ControlTemplate></Thumb.Template></Thumb></Track.Thumb></Track>
-        </ControlTemplate></Setter.Value></Setter></Trigger></Style.Triggers>
-    </Style>
-    <Style TargetType="ProgressBar">
-      <Setter Property="Height" Value="6"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ProgressBar">
-        <Grid><Border x:Name="PART_Track" CornerRadius="3" Background="#262A33"/>
-          <Border x:Name="PART_Indicator" CornerRadius="3" Background="{StaticResource Blue}" HorizontalAlignment="Left"/></Grid>
-      </ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style TargetType="DataGrid">
-      <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="#F2F3F5"/><Setter Property="BorderThickness" Value="0"/>
-      <Setter Property="RowBackground" Value="Transparent"/><Setter Property="AlternatingRowBackground" Value="#16191F"/>
-      <Setter Property="GridLinesVisibility" Value="None"/><Setter Property="HeadersVisibility" Value="Column"/>
-      <Setter Property="AutoGenerateColumns" Value="False"/><Setter Property="IsReadOnly" Value="True"/><Setter Property="CanUserAddRows" Value="False"/>
-      <Setter Property="SelectionMode" Value="Single"/><Setter Property="RowHeight" Value="36"/>
-    </Style>
-    <Style TargetType="DataGridColumnHeader">
-      <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="#8E949F"/><Setter Property="FontSize" Value="12"/>
-      <Setter Property="Padding" Value="12,8"/><Setter Property="BorderBrush" Value="#262A33"/><Setter Property="BorderThickness" Value="0,0,0,1"/>
-    </Style>
-    <Style TargetType="DataGridCell">
-      <Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="12,0"/><Setter Property="Foreground" Value="#F2F3F5"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="DataGridCell">
-        <Border Padding="{TemplateBinding Padding}" Background="Transparent"><ContentPresenter VerticalAlignment="Center"/></Border>
-      </ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style x:Key="CardBorder" TargetType="Border">
-      <Setter Property="Background" Value="{StaticResource Card}"/><Setter Property="CornerRadius" Value="14"/><Setter Property="Padding" Value="20"/>
-    </Style>
-    <Style x:Key="H1" TargetType="TextBlock"><Setter Property="FontFamily" Value="{StaticResource Display}"/><Setter Property="FontSize" Value="26"/><Setter Property="FontWeight" Value="SemiBold"/></Style>
-    <Style x:Key="H2" TargetType="TextBlock"><Setter Property="FontFamily" Value="{StaticResource Display}"/><Setter Property="FontSize" Value="15"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Margin" Value="0,0,0,10"/></Style>
-    <Style x:Key="Label" TargetType="TextBlock"><Setter Property="Foreground" Value="#8E949F"/><Setter Property="FontSize" Value="12"/><Setter Property="Margin" Value="0,10,0,6"/></Style>
-    <Style x:Key="Hint" TargetType="TextBlock"><Setter Property="Foreground" Value="#8E949F"/><Setter Property="FontSize" Value="12"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
-    <Style x:Key="Tile" TargetType="Button">
-      <Setter Property="Cursor" Value="Hand"/><Setter Property="Foreground" Value="#F2F3F5"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-        <Border x:Name="b" CornerRadius="14" Background="#1A1D24" Padding="18,16"><ContentPresenter/></Border>
-        <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#20242C"/></Trigger></ControlTemplate.Triggers>
-      </ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Storyboard x:Key="Spin" RepeatBehavior="Forever">
-      <DoubleAnimation Storyboard.TargetName="SpinRotate" Storyboard.TargetProperty="Angle" From="0" To="360" Duration="0:0:0.9"/>
-    </Storyboard>
-  </Window.Resources>
-
-  <Grid>
-    <Grid.ColumnDefinitions><ColumnDefinition Width="232"/><ColumnDefinition/></Grid.ColumnDefinitions>
-
-    <!-- Sidebar -->
-    <Border Background="#17191F" BorderBrush="#22252C" BorderThickness="0,0,1,0">
-      <DockPanel Margin="14,14,14,14" LastChildFill="False">
-        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="4,0,0,22">
-          <Button x:Name="BtnClose" Style="{StaticResource Light}" Background="#FF5F57" Content="&#xE8BB;"/>
-          <Button x:Name="BtnMin" Style="{StaticResource Light}" Background="#FEBC2E" Content="&#xE921;"/>
-          <Button x:Name="BtnMax" Style="{StaticResource Light}" Background="#28C840" Content="&#xE740;"/>
-        </StackPanel>
-        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="6,0,0,22">
-          <Image x:Name="Logo" Width="34" Height="34"/>
-          <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
-            <TextBlock Text="ALERION Update" FontWeight="SemiBold" FontSize="14" Foreground="White"/>
-            <TextBlock x:Name="TxtSidebarSub" FontSize="11.5" Foreground="#8E949F"/>
-          </StackPanel>
-        </StackPanel>
-        <RadioButton x:Name="NavOverview" DockPanel.Dock="Top" Style="{StaticResource Nav}" GroupName="nav" IsChecked="True">
-          <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE80F;" FontFamily="{StaticResource Icons}" Margin="0,2,12,0" Foreground="#0A84FF"/><TextBlock x:Name="TxtNavOverview"/></StackPanel></RadioButton>
-        <RadioButton x:Name="NavUpdates" DockPanel.Dock="Top" Style="{StaticResource Nav}" GroupName="nav">
-          <Grid><StackPanel Orientation="Horizontal"><TextBlock Text="&#xE896;" FontFamily="{StaticResource Icons}" Margin="0,2,12,0" Foreground="#0A84FF"/><TextBlock x:Name="TxtNavUpdates"/></StackPanel>
-            <Border x:Name="Badge" HorizontalAlignment="Right" CornerRadius="9" Background="#FF453A" Padding="7,1" Margin="0,0,-2,0" Visibility="Collapsed">
-              <TextBlock x:Name="TxtBadge" FontSize="11" FontWeight="SemiBold" Foreground="White"/></Border></Grid></RadioButton>
-        <RadioButton x:Name="NavHistory" DockPanel.Dock="Top" Style="{StaticResource Nav}" GroupName="nav">
-          <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE81C;" FontFamily="{StaticResource Icons}" Margin="0,2,12,0" Foreground="#0A84FF"/><TextBlock x:Name="TxtNavHistory"/></StackPanel></RadioButton>
-
-        <StackPanel DockPanel.Dock="Bottom">
-          <RadioButton x:Name="NavSettings" Style="{StaticResource Nav}" GroupName="nav">
-            <StackPanel Orientation="Horizontal"><TextBlock Text="&#xE713;" FontFamily="{StaticResource Icons}" Margin="0,2,12,0" Foreground="#8E949F"/><TextBlock x:Name="TxtNavSettings"/></StackPanel></RadioButton>
-          <TextBlock x:Name="TxtVersion" Foreground="#5E6470" FontSize="11" Margin="10,10,0,0"/>
-        </StackPanel>
-      </DockPanel>
-    </Border>
-
-    <!-- Content -->
-    <Grid Grid.Column="1" Margin="0,40,0,0">
-
-      <!-- Overview -->
-      <ScrollViewer x:Name="PageOverview" VerticalScrollBarVisibility="Auto" Padding="32,0,32,28">
-        <StackPanel>
-          <Border CornerRadius="18" Padding="28,26">
-            <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#231C3D" Offset="0"/><GradientStop Color="#102A44" Offset="1"/></LinearGradientBrush></Border.Background>
-            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-              <Grid Width="54" Height="54" Margin="0,0,20,0" VerticalAlignment="Center">
-                <Ellipse x:Name="StateCircle" Fill="#30D158" Opacity="0.18"/>
-                <TextBlock x:Name="StateGlyph" Text="&#xE73E;" FontFamily="{StaticResource Icons}" FontSize="22" Foreground="#30D158" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                <Path x:Name="Spinner" Data="M 27,4 A 23,23 0 0 1 50,27" Stroke="#0A84FF" StrokeThickness="3.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Visibility="Collapsed" RenderTransformOrigin="0.5,0.5">
-                  <Path.RenderTransform><RotateTransform x:Name="SpinRotate"/></Path.RenderTransform></Path>
-              </Grid>
-              <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                <TextBlock x:Name="TxtState" Style="{StaticResource H1}" Foreground="White"/>
-                <TextBlock x:Name="TxtSub" Foreground="#A9AFBC" Margin="0,4,0,0"/>
-              </StackPanel>
-              <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="BtnScan" Style="{StaticResource Secondary}" Margin="0,0,10,0"/>
-                <Button x:Name="BtnCancel" Style="{StaticResource Secondary}" Margin="0,0,10,0" Visibility="Collapsed"/>
-                <Button x:Name="BtnRecommended" Style="{StaticResource Primary}"/>
-              </StackPanel>
-            </Grid>
-          </Border>
-
-          <StackPanel x:Name="ProgressPanel" Margin="4,16,4,0" Visibility="Collapsed">
-            <Grid><TextBlock x:Name="TxtCurrent" Foreground="#C7CBD3" Margin="0,0,60,0"/>
-              <TextBlock x:Name="TxtPercent" HorizontalAlignment="Right" Foreground="#8E949F"/></Grid>
-            <ProgressBar x:Name="Progress" Margin="0,8,0,0" Maximum="100"/>
-          </StackPanel>
-
-          <Border x:Name="RebootBanner" Margin="0,16,0,0" CornerRadius="12" Padding="16,10" Background="#2B2412" Visibility="Collapsed">
-            <Grid><StackPanel Orientation="Horizontal" VerticalAlignment="Center"><TextBlock Text="&#xE7BA;" FontFamily="{StaticResource Icons}" Foreground="#FF9F0A" Margin="0,2,10,0"/>
-              <TextBlock x:Name="TxtRebootBanner" Foreground="#FFD60A"/></StackPanel>
-              <Button x:Name="BtnRestart" Style="{StaticResource Secondary}" HorizontalAlignment="Right" Padding="14,6"/></Grid>
-          </Border>
-
-          <UniformGrid Columns="4" Margin="-6,16,-6,0">
-            <Button x:Name="TileCritical" Style="{StaticResource Tile}" Margin="6"><StackPanel>
-              <StackPanel Orientation="Horizontal"><Ellipse Width="8" Height="8" Fill="#FF453A" Margin="0,0,8,0"/><TextBlock x:Name="LblTileCritical" Foreground="#8E949F" FontSize="12"/></StackPanel>
-              <TextBlock x:Name="TxtTileCritical" FontFamily="{StaticResource Display}" FontSize="30" FontWeight="SemiBold" Margin="0,6,0,0"/></StackPanel></Button>
-            <Button x:Name="TileImportant" Style="{StaticResource Tile}" Margin="6"><StackPanel>
-              <StackPanel Orientation="Horizontal"><Ellipse Width="8" Height="8" Fill="#FF9F0A" Margin="0,0,8,0"/><TextBlock x:Name="LblTileImportant" Foreground="#8E949F" FontSize="12"/></StackPanel>
-              <TextBlock x:Name="TxtTileImportant" FontFamily="{StaticResource Display}" FontSize="30" FontWeight="SemiBold" Margin="0,6,0,0"/></StackPanel></Button>
-            <Button x:Name="TileNormal" Style="{StaticResource Tile}" Margin="6"><StackPanel>
-              <StackPanel Orientation="Horizontal"><Ellipse Width="8" Height="8" Fill="#0A84FF" Margin="0,0,8,0"/><TextBlock x:Name="LblTileNormal" Foreground="#8E949F" FontSize="12"/></StackPanel>
-              <TextBlock x:Name="TxtTileNormal" FontFamily="{StaticResource Display}" FontSize="30" FontWeight="SemiBold" Margin="0,6,0,0"/></StackPanel></Button>
-            <Button x:Name="TileOptional" Style="{StaticResource Tile}" Margin="6"><StackPanel>
-              <StackPanel Orientation="Horizontal"><Ellipse Width="8" Height="8" Fill="#8E8E93" Margin="0,0,8,0"/><TextBlock x:Name="LblTileOptional" Foreground="#8E949F" FontSize="12"/></StackPanel>
-              <TextBlock x:Name="TxtTileOptional" FontFamily="{StaticResource Display}" FontSize="30" FontWeight="SemiBold" Margin="0,6,0,0"/></StackPanel></Button>
-          </UniformGrid>
-
-          <UniformGrid Columns="3" Margin="-6,4,-6,0">
-            <Border Style="{StaticResource CardBorder}" Margin="6"><StackPanel><TextBlock x:Name="LblLastScan" Style="{StaticResource Label}" Margin="0,0,0,4"/><TextBlock x:Name="TxtLastScan" FontSize="14.5" FontWeight="SemiBold"/></StackPanel></Border>
-            <Border Style="{StaticResource CardBorder}" Margin="6"><StackPanel><TextBlock x:Name="LblLastRun" Style="{StaticResource Label}" Margin="0,0,0,4"/><TextBlock x:Name="TxtLastRun" FontSize="14.5" FontWeight="SemiBold"/></StackPanel></Border>
-            <Border Style="{StaticResource CardBorder}" Margin="6"><StackPanel><TextBlock x:Name="LblNext" Style="{StaticResource Label}" Margin="0,0,0,4"/><TextBlock x:Name="TxtNext" FontSize="14.5" FontWeight="SemiBold"/></StackPanel></Border>
-          </UniformGrid>
-
-          <Border Style="{StaticResource CardBorder}" Margin="0,10,0,0" Padding="18,14">
-            <StackPanel>
-              <Grid><TextBlock x:Name="LblLog" Style="{StaticResource H2}" Margin="0"/>
-                <Button x:Name="BtnToggleLog" Style="{StaticResource Ghost}" HorizontalAlignment="Right"/></Grid>
-              <ListBox x:Name="LogList" Background="Transparent" BorderThickness="0" Foreground="#A9AFBC" FontFamily="Cascadia Mono, Consolas" FontSize="11.5"
-                       Height="200" Margin="0,10,0,0" Visibility="Collapsed" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
-            </StackPanel>
-          </Border>
-        </StackPanel>
-      </ScrollViewer>
-
-      <!-- Updates -->
-      <Grid x:Name="PageUpdates" Visibility="Collapsed" Margin="32,0,32,0">
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-        <Grid>
-          <StackPanel><TextBlock x:Name="TxtUpdatesTitle" Style="{StaticResource H1}"/><TextBlock x:Name="TxtUpdatesSub" Foreground="#8E949F" Margin="0,2,0,0"/></StackPanel>
-          <Grid HorizontalAlignment="Right" Width="300" VerticalAlignment="Center">
-            <TextBox x:Name="TxtSearch" Padding="32,0,10,0" Height="38"/>
-            <TextBlock Text="&#xE721;" FontFamily="{StaticResource Icons}" Foreground="#8E949F" Margin="12,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
-            <TextBlock x:Name="TxtSearchHint" Foreground="#6B717D" Margin="34,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
-          </Grid>
-        </Grid>
-        <Border Grid.Row="1" Style="{StaticResource SegmentBar}" Margin="0,16,0,10">
-          <StackPanel Orientation="Horizontal">
-            <RadioButton x:Name="SegAll" Style="{StaticResource Segment}" GroupName="seg" IsChecked="True"/>
-            <RadioButton x:Name="SegCritical" Style="{StaticResource Segment}" GroupName="seg"/>
-            <RadioButton x:Name="SegImportant" Style="{StaticResource Segment}" GroupName="seg"/>
-            <RadioButton x:Name="SegNormal" Style="{StaticResource Segment}" GroupName="seg"/>
-            <RadioButton x:Name="SegOptional" Style="{StaticResource Segment}" GroupName="seg"/>
-            <RadioButton x:Name="SegExcluded" Style="{StaticResource Segment}" GroupName="seg"/>
-            <RadioButton x:Name="SegInstalled" Style="{StaticResource Segment}" GroupName="seg"/>
-          </StackPanel>
-        </Border>
-        <Grid Grid.Row="2">
-          <ListBox x:Name="UpdateList" Background="Transparent" BorderThickness="0" Foreground="#F2F3F5" HorizontalContentAlignment="Stretch"
-                   ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.IsVirtualizingWhenGrouping="True" VirtualizingPanel.ScrollUnit="Pixel">
-            <ListBox.ItemContainerStyle>
-              <Style TargetType="ListBoxItem">
-                <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
-                  <Border x:Name="b" CornerRadius="10" Padding="12,9" Margin="0,1" Background="Transparent"><ContentPresenter/></Border>
-                  <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#1A1D24"/></Trigger></ControlTemplate.Triggers>
-                </ControlTemplate></Setter.Value></Setter>
-              </Style>
-            </ListBox.ItemContainerStyle>
-            <ListBox.GroupStyle>
-              <GroupStyle>
-                <GroupStyle.HeaderTemplate><DataTemplate>
-                  <Grid Margin="12,14,12,4">
-                    <StackPanel Orientation="Horizontal">
-                      <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12.5" Foreground="#C7CBD3"/>
-                      <TextBlock Text="{Binding ItemCount}" Foreground="#6B717D" FontSize="12.5" Margin="8,0,0,0"/>
-                    </StackPanel>
-                    <Button x:Name="GroupSelect" Tag="{Binding Name}" HorizontalAlignment="Right" Padding="8,2" FontSize="12" Foreground="#0A84FF" Content="{DynamicResource SelectAllText}">
-                      <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Ghost}">
-                        <Style.Triggers><DataTrigger Binding="{Binding Items[0].Selectable}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Button.Style>
-                    </Button>
-                  </Grid>
-                </DataTemplate></GroupStyle.HeaderTemplate>
-              </GroupStyle>
-            </ListBox.GroupStyle>
-            <ListBox.ItemTemplate><DataTemplate>
-              <Grid>
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition/><ColumnDefinition Width="230"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="104"/><ColumnDefinition Width="36"/></Grid.ColumnDefinitions>
-                <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" IsEnabled="{Binding Selectable}">
-                  <CheckBox.Style><Style TargetType="CheckBox" BasedOn="{StaticResource Tick}">
-                    <Style.Triggers><DataTrigger Binding="{Binding IsUpdate}" Value="False"><Setter Property="Visibility" Value="Hidden"/></DataTrigger></Style.Triggers></Style></CheckBox.Style>
-                </CheckBox>
-                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
-                  <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
-                  <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
-                    <TextBlock Text="{Binding SourceLabel}" Foreground="#6B717D" FontSize="11.5"/>
-                    <TextBlock Text="  &#x00B7;  " Foreground="#6B717D" FontSize="11.5"/>
-                    <TextBlock Text="{Binding Id}" Foreground="#6B717D" FontSize="11.5" MaxWidth="320"/>
-                    <TextBlock Text="{Binding Note}" Foreground="#8E949F" FontSize="11.5" Margin="10,0,0,0" MaxWidth="320"/>
-                  </StackPanel>
-                </StackPanel>
-                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                  <TextBlock Text="{Binding From}" Foreground="#8E949F" FontFamily="Cascadia Mono, Consolas" FontSize="12" MaxWidth="100"/>
-                  <TextBlock Text="  &#x2192;  " Foreground="#6B717D" FontSize="12"><TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers><DataTrigger Binding="{Binding ShowArrow}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
-                  <TextBlock Text="{Binding To}" Foreground="#F2F3F5" FontFamily="Cascadia Mono, Consolas" FontSize="12" MaxWidth="100"/>
-                </StackPanel>
-                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
-                  <Border CornerRadius="6" Padding="7,2" Background="#2B2412" Margin="0,0,6,0">
-                    <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Collapsed"/>
-                      <Style.Triggers><DataTrigger Binding="{Binding Major}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></Border.Style>
-                    <TextBlock Text="{Binding MajorLabel}" Foreground="#FF9F0A" FontSize="11"/></Border>
-                  <Border CornerRadius="6" Padding="7,2" Background="#22252D">
-                    <Border.Style><Style TargetType="Border"><Style.Triggers><DataTrigger Binding="{Binding IsUpdate}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Border.Style>
-                    <StackPanel Orientation="Horizontal"><Ellipse Width="6" Height="6" Fill="{Binding PriorityBrush}" Margin="0,0,6,0"/>
-                      <TextBlock Text="{Binding PriorityLabel}" Foreground="#C7CBD3" FontSize="11"/></StackPanel></Border>
-                </StackPanel>
-                <TextBlock Grid.Column="4" Text="{Binding StateText}" Foreground="{Binding StateBrush}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                <Button x:Name="ExcludeBtn" Grid.Column="5" Content="{Binding ExcludeGlyph}" ToolTip="{Binding ExcludeTip}"
-                        FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="13" Padding="7,5">
-                  <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Ghost}">
-                    <Style.Triggers><DataTrigger Binding="{Binding CanExclude}" Value="False"><Setter Property="Visibility" Value="Hidden"/></DataTrigger></Style.Triggers></Style></Button.Style>
-                </Button>
-              </Grid>
-            </DataTemplate></ListBox.ItemTemplate>
-          </ListBox>
-          <StackPanel x:Name="EmptyPanel" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed">
-            <TextBlock x:Name="EmptyGlyph" Text="&#xE73E;" FontFamily="{StaticResource Icons}" FontSize="36" Foreground="#30D158" HorizontalAlignment="Center"/>
-            <TextBlock x:Name="TxtEmpty" Foreground="#8E949F" Margin="0,12,0,0" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="420"/>
-          </StackPanel>
-        </Grid>
-        <Border Grid.Row="3" Margin="-32,0,-32,0" Padding="32,12" Background="#15171C" BorderBrush="#22252C" BorderThickness="0,1,0,0">
-          <Grid>
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-              <TextBlock x:Name="TxtSelected" Foreground="#C7CBD3" VerticalAlignment="Center"/>
-              <Button x:Name="BtnSelectNone" Style="{StaticResource Ghost}" Margin="12,0,0,0" Foreground="#0A84FF"/>
-            </StackPanel>
-            <Button x:Name="BtnInstallSelected" Style="{StaticResource Primary}" HorizontalAlignment="Right"/>
-          </Grid>
-        </Border>
-      </Grid>
-
-      <!-- History -->
-      <Grid x:Name="PageHistory" Visibility="Collapsed" Margin="32,0,32,28">
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
-        <Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition/></Grid.ColumnDefinitions>
-        <StackPanel Grid.ColumnSpan="2" Margin="0,0,0,16"><TextBlock x:Name="TxtHistoryTitle" Style="{StaticResource H1}"/><TextBlock x:Name="TxtRepMeta" Foreground="#8E949F" Margin="0,2,0,0"/></StackPanel>
-        <StackPanel Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-          <Button x:Name="BtnLogs" Style="{StaticResource Secondary}" Margin="0,0,10,0"/><Button x:Name="BtnHtml" Style="{StaticResource Secondary}"/></StackPanel>
-        <ListBox x:Name="ReportList" Grid.Row="1" Background="Transparent" BorderThickness="0" Foreground="#F2F3F5" Margin="0,0,14,0" HorizontalContentAlignment="Stretch">
-          <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem">
-            <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
-              <Border x:Name="b" CornerRadius="10" Padding="12,9" Margin="0,1" Background="Transparent"><ContentPresenter/></Border>
-              <ControlTemplate.Triggers>
-                <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#1A1D24"/></Trigger>
-                <Trigger Property="IsSelected" Value="True"><Setter TargetName="b" Property="Background" Value="#24324A"/></Trigger>
-              </ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style></ListBox.ItemContainerStyle>
-          <ListBox.ItemTemplate><DataTemplate><StackPanel>
-            <TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Text="{Binding Subtitle}" Foreground="#8E949F" FontSize="12" Margin="0,2,0,0"/>
-          </StackPanel></DataTemplate></ListBox.ItemTemplate>
-        </ListBox>
-        <TextBlock x:Name="TxtHistoryEmpty" Grid.Row="1" Grid.ColumnSpan="2" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="#8E949F" Visibility="Collapsed"/>
-        <Border x:Name="HistoryCard" Grid.Row="1" Grid.Column="1" Style="{StaticResource CardBorder}" Padding="6">
-          <DataGrid x:Name="Grid">
-            <DataGrid.Columns>
-              <DataGridTextColumn x:Name="ColSource" Binding="{Binding Source}" Width="100"/>
-              <DataGridTextColumn x:Name="ColName" Binding="{Binding Name}" Width="2*"/>
-              <DataGridTextColumn x:Name="ColFrom" Binding="{Binding From}" Width="*" FontFamily="Cascadia Mono, Consolas"/>
-              <DataGridTextColumn x:Name="ColTo" Binding="{Binding To}" Width="*" FontFamily="Cascadia Mono, Consolas"/>
-              <DataGridTemplateColumn x:Name="ColStatus" Width="120"><DataGridTemplateColumn.CellTemplate><DataTemplate>
-                <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusColor}" FontWeight="SemiBold"/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
-              <DataGridTextColumn x:Name="ColNote" Binding="{Binding Note}" Width="2*" Foreground="#8E949F"/>
-            </DataGrid.Columns>
-          </DataGrid>
-        </Border>
-      </Grid>
-
-      <!-- Settings -->
-      <ScrollViewer x:Name="PageSettings" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Padding="32,0,24,28">
-        <StackPanel MaxWidth="760" HorizontalAlignment="Left">
-          <Grid Margin="0,0,0,16"><TextBlock x:Name="TxtSettingsTitle" Style="{StaticResource H1}"/>
-            <TextBlock x:Name="TxtSaved" Foreground="#30D158" HorizontalAlignment="Right" VerticalAlignment="Center"/></Grid>
-
-          <Border Style="{StaticResource CardBorder}" Margin="0,0,0,12"><StackPanel>
-            <TextBlock x:Name="LblAuto" Style="{StaticResource H2}"/>
-            <WrapPanel>
-              <StackPanel Margin="0,0,16,0"><TextBlock x:Name="LblSchType" Style="{StaticResource Label}"/><ComboBox x:Name="CmbSchedule"/></StackPanel>
-              <StackPanel x:Name="PnlDay" Margin="0,0,16,0"><TextBlock x:Name="LblDay" Style="{StaticResource Label}"/><ComboBox x:Name="CmbDay" MinWidth="160"/></StackPanel>
-              <StackPanel x:Name="PnlDom" Margin="0,0,16,0"><TextBlock x:Name="LblDom" Style="{StaticResource Label}"/><ComboBox x:Name="CmbDom" MinWidth="100"/></StackPanel>
-              <StackPanel x:Name="PnlTime"><TextBlock x:Name="LblTime" Style="{StaticResource Label}"/><TextBox x:Name="TxtTime" Width="100"/></StackPanel>
-            </WrapPanel>
-            <StackPanel x:Name="PnlAutoDetails">
-              <TextBlock x:Name="LblAction" Style="{StaticResource Label}" Margin="0,16,0,6"/>
-              <Border Style="{StaticResource SegmentBar}"><StackPanel Orientation="Horizontal">
-                <RadioButton x:Name="RbActInstall" Style="{StaticResource Segment}" GroupName="act"/>
-                <RadioButton x:Name="RbActNotify" Style="{StaticResource Segment}" GroupName="act"/></StackPanel></Border>
-              <StackPanel x:Name="PnlAutoPrio">
-                <TextBlock x:Name="LblAutoPrio" Style="{StaticResource Label}" Margin="0,16,0,8"/>
-                <WrapPanel>
-                  <CheckBox x:Name="ChkPrioCritical" Style="{StaticResource Tick}" Margin="0,0,22,0"/>
-                  <CheckBox x:Name="ChkPrioImportant" Style="{StaticResource Tick}" Margin="0,0,22,0"/>
-                  <CheckBox x:Name="ChkPrioNormal" Style="{StaticResource Tick}" Margin="0,0,22,0"/>
-                  <CheckBox x:Name="ChkPrioOptional" Style="{StaticResource Tick}"/>
-                </WrapPanel>
-              </StackPanel>
-              <CheckBox x:Name="ChkWake" Style="{StaticResource Toggle}" Margin="0,16,0,0"/>
-            </StackPanel>
-          </StackPanel></Border>
-
-          <Border Style="{StaticResource CardBorder}" Margin="0,0,0,12"><StackPanel>
-            <TextBlock x:Name="LblBehavior" Style="{StaticResource H2}"/>
-            <TextBlock x:Name="LblMode2" Style="{StaticResource Label}" Margin="0,0,0,6"/>
-            <Border Style="{StaticResource SegmentBar}"><StackPanel Orientation="Horizontal">
-              <RadioButton x:Name="RbVisible" Style="{StaticResource Segment}" GroupName="mode"/>
-              <RadioButton x:Name="RbSilent" Style="{StaticResource Segment}" GroupName="mode"/></StackPanel></Border>
-            <CheckBox x:Name="ChkParallel" Style="{StaticResource Toggle}" Margin="0,14,0,0"/>
-            <CheckBox x:Name="ChkRestore" Style="{StaticResource Toggle}"/>
-            <Grid Margin="0,6,0,0"><TextBlock x:Name="LblReboot" VerticalAlignment="Center"/><ComboBox x:Name="CmbReboot" HorizontalAlignment="Right" MinWidth="240"/></Grid>
-            <Grid Margin="0,10,0,0"><TextBlock x:Name="LblLang" VerticalAlignment="Center"/><ComboBox x:Name="CmbLang" HorizontalAlignment="Right" MinWidth="240"/></Grid>
-          </StackPanel></Border>
-
-          <Border Style="{StaticResource CardBorder}" Margin="0,0,0,12"><StackPanel>
-            <TextBlock x:Name="LblSources" Style="{StaticResource H2}"/>
-            <StackPanel x:Name="SourcePanel"/>
-          </StackPanel></Border>
-
-          <Border Style="{StaticResource CardBorder}" Margin="0,0,0,12"><StackPanel>
-            <TextBlock x:Name="LblExcl" Style="{StaticResource H2}"/>
-            <TextBlock x:Name="TxtExclHint" Style="{StaticResource Hint}" Margin="0,0,0,10"/>
-            <ItemsControl x:Name="ExclChips">
-              <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-              <ItemsControl.ItemTemplate><DataTemplate>
-                <Border CornerRadius="8" Background="#262A33" Padding="10,4,4,4" Margin="0,0,8,8">
-                  <StackPanel Orientation="Horizontal"><TextBlock Text="{Binding}" FontFamily="Cascadia Mono, Consolas" FontSize="12" VerticalAlignment="Center"/>
-                    <Button x:Name="ChipRemove" Tag="{Binding}" Style="{StaticResource Ghost}" Content="&#xE711;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="9" Padding="6,4" Margin="4,0,0,0"/></StackPanel>
-                </Border></DataTemplate></ItemsControl.ItemTemplate>
-            </ItemsControl>
-            <Grid Margin="0,4,0,0"><TextBox x:Name="TxtExclAdd" Margin="0,0,120,0" FontFamily="Cascadia Mono, Consolas"/>
-              <Button x:Name="BtnExclAdd" Style="{StaticResource Secondary}" HorizontalAlignment="Right" Width="110"/></Grid>
-          </StackPanel></Border>
-
-          <Border Style="{StaticResource CardBorder}" Margin="0,0,0,12"><StackPanel>
-            <TextBlock x:Name="LblSelf" Style="{StaticResource H2}"/>
-            <TextBlock x:Name="TxtSelfStatus" Style="{StaticResource Hint}" Margin="0,0,0,6"/>
-            <CheckBox x:Name="ChkSelf" Style="{StaticResource Toggle}"/>
-            <TextBlock x:Name="LblRepo" Style="{StaticResource Label}"/><TextBox x:Name="TxtRepo" Width="320" HorizontalAlignment="Left"/>
-          </StackPanel></Border>
-        </StackPanel>
-      </ScrollViewer>
-    </Grid>
-  </Grid>
-</Window>
-'@
-
-$window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
+# ------------------------------------------------------------------ window
+$window = [Windows.Markup.XamlReader]::Parse((Get-Content (Join-Path $src 'Gui.xaml') -Raw -Encoding UTF8))
 $ui = @{}
-$xaml.SelectNodes('//*[@*[local-name()="Name"]]') | ForEach-Object {
-    $n = $_.Attributes | Where-Object { $_.LocalName -eq 'Name' } | Select-Object -First 1
-    if ($n) { $el = $window.FindName($n.Value); if ($el) { $ui[$n.Value] = $el } }
+foreach ($m in [regex]::Matches((Get-Content (Join-Path $src 'Gui.xaml') -Raw), 'x:Name="([^"]+)"')) {
+    $el = $window.FindName($m.Groups[1].Value); if ($el) { $ui[$m.Groups[1].Value] = $el }
 }
+$largeLogo = Join-Path $paths.AppRoot 'assets\logo.png'
 if (Test-Path $paths.IconPath) { $window.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([uri]$paths.IconPath) }
 if (Test-Path $paths.LogoPath) { $ui.Logo.Source = [Windows.Media.Imaging.BitmapImage]::new([uri]$paths.LogoPath) }
-$window.Add_SourceInitialized({ [Alerion.ShellUtil]::StyleWindow((New-Object System.Windows.Interop.WindowInteropHelper $window).Handle) })
+if (Test-Path $largeLogo) { $ui.HeroLogo.Source = [Windows.Media.Imaging.BitmapImage]::new([uri]$largeLogo) }
+
+$brushConverter = New-Object System.Windows.Media.BrushConverter
+function Get-Brush { param([string]$Hex) $brushConverter.ConvertFromString($Hex) }
+
+$window.Add_SourceInitialized({
+    $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle
+    $glass = $false
+    if (-not $Snapshot) {
+        # Transparent composition target + acrylic backdrop = real glass (Windows 11 22H2+).
+        [System.Windows.Interop.HwndSource]::FromHwnd($hwnd).CompositionTarget.BackgroundColor = [System.Windows.Media.Colors]::Transparent
+        $glass = [Alerion.ShellUtil]::StyleWindow($hwnd)
+    }
+    if (-not $glass) { $ui.Tint.Background = Get-Brush '#FF0E1015' }   # solid fallback (Windows 10 / snapshots)
+})
 
 # ------------------------------------------------------------------ state
-$prioColors  = @{ Critical = '#FF453A'; Important = '#FF9F0A'; Normal = '#0A84FF'; Optional = '#8E8E93' }
+$prioColors  = @{ Critical = '#FF453A'; Important = '#FF9F0A'; Normal = '#3D7BFF'; Optional = '#8A93A1' }
 $prioRank    = @{ Critical = 0; Important = 1; Normal = 2; Optional = 3 }
-$stateColors = @{ Pending = '#8E949F'; Running = '#0A84FF'; Done = '#30D158'; Failed = '#FF453A'; Skipped = '#8E949F'; Current = '#30D158' }
-$statusColors = @{ Updated = '#30D158'; Failed = '#FF453A'; Skipped = '#8E949F'; Info = '#8E949F'; Available = '#0A84FF'; Triggered = '#0A84FF' }
+$stateColors = @{ Pending = '#8A93A1'; Running = '#6FA8FF'; Done = '#30D158'; Failed = '#FF6B61'; Skipped = '#8A93A1'; Current = '#30D158' }
+$statusColors = @{ Updated = '#30D158'; Failed = '#FF6B61'; Skipped = '#8A93A1'; Info = '#8A93A1'; Available = '#6FA8FF'; Triggered = '#6FA8FF' }
 $rows = New-Object 'System.Collections.ObjectModel.ObservableCollection[Alerion.UpdateRow]'
 $view = [System.Windows.Data.CollectionViewSource]::GetDefaultView($rows)
 $ui.UpdateList.ItemsSource = $rows
@@ -610,11 +112,11 @@ $script:runMode = ''
 $script:loading = $false
 $script:scanAt = $null
 $script:wasRunning = $false
+$script:estimate = $null
 $sourceKeys = @('Winget', 'WingetIncludeUnknown', 'Chocolatey', 'Store', 'WindowsUpdate', 'WindowsUpdateDrivers', 'MicrosoftUpdate', 'Nvidia', 'Defender', 'Office')
 $sourceBoxes = @{}
+$sourceRows = @{}
 
-$brushConverter = New-Object System.Windows.Media.BrushConverter
-function Get-Brush { param([string]$Hex) $brushConverter.ConvertFromString($Hex) }
 function New-ComboItem { param($Tag, $Text) $i = New-Object System.Windows.Controls.ComboBoxItem; $i.Tag = $Tag; $i.Content = $Text; $i }
 function Select-ComboTag { param($Combo, $Tag) foreach ($i in $Combo.Items) { if ([string]$i.Tag -eq [string]$Tag) { $Combo.SelectedItem = $i; return } }; if ($Combo.Items.Count) { $Combo.SelectedIndex = 0 } }
 function Format-When { param($Date)
@@ -625,14 +127,126 @@ function Format-When { param($Date)
     if ($d.Date -eq (Get-Date).Date) { return (T 'time.todayAt' @($d.ToString('HH:mm'))) }
     return $d.ToString('ddd, dd.MM.  HH:mm')
 }
+function Format-At { param([datetime]$At)
+    if ($At.Date -eq (Get-Date).Date) { return (T 'time.todayAt' @($At.ToString('HH:mm'))) }
+    if ($At.Date -eq (Get-Date).Date.AddDays(1)) { return (T 'time.tomorrowAt' @($At.ToString('HH:mm'))) }
+    return $At.ToString('ddd, dd.MM.  HH:mm')
+}
+
+# ------------------------------------------------------------------ in-app dialog
+function Close-Dialog { $ui.DialogLayer.Visibility = 'Collapsed'; $ui.DlgExtra.Children.Clear(); $ui.DlgButtons.Children.Clear() }
+
+function Show-Dialog {
+    <# Modal card inside the window. Buttons: @{ Text; Kind = Primary|Secondary|Danger|Ghost; Action = {...} } #>
+    param([string]$Title, [string]$Text, [string]$Glyph = [string][char]0xE946, [string[]]$Colors = @('#22D3EE', '#2F6BFF'),
+          [object[]]$Buttons = @(), [System.Windows.UIElement[]]$Extra = @())
+    Close-Dialog
+    $ui.DlgTitle.Text = $Title; $ui.DlgText.Text = $Text; $ui.DlgIcon.Text = $Glyph
+    $ui.DlgText.Visibility = if ($Text) { 'Visible' } else { 'Collapsed' }
+    $g = New-Object System.Windows.Media.LinearGradientBrush
+    $g.StartPoint = '0,0'; $g.EndPoint = '1,1'
+    $g.GradientStops.Add((New-Object System.Windows.Media.GradientStop ([System.Windows.Media.ColorConverter]::ConvertFromString($Colors[0])), 0))
+    $g.GradientStops.Add((New-Object System.Windows.Media.GradientStop ([System.Windows.Media.ColorConverter]::ConvertFromString($Colors[-1])), 1))
+    $ui.DlgIconBg.Background = $g
+    foreach ($e in $Extra) { [void]$ui.DlgExtra.Children.Add($e) }
+    $ui.DlgExtra.Visibility = if ($Extra.Count) { 'Visible' } else { 'Collapsed' }
+    foreach ($b in $Buttons) {
+        $btn = New-Object System.Windows.Controls.Button
+        $btn.Content = $b.Text
+        $btn.Style = $window.FindResource($(if ($b.Kind) { $b.Kind } else { 'Secondary' }))
+        $btn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
+        $btn.HorizontalAlignment = 'Stretch'
+        $btn.Tag = $b.Action
+        $btn.Add_Click({ param($s) $action = $s.Tag; Close-Dialog; if ($action) { & $action } })
+        [void]$ui.DlgButtons.Children.Add($btn)
+    }
+    $ui.DialogLayer.Visibility = 'Visible'
+    # small "pop" animation
+    $ui.DialogCard.Opacity = 0
+    $fade = New-Object System.Windows.Media.Animation.DoubleAnimation(0, 1, [TimeSpan]::FromMilliseconds(160))
+    $pop = New-Object System.Windows.Media.Animation.DoubleAnimation(0.94, 1, [TimeSpan]::FromMilliseconds(220))
+    $pop.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+    $ui.DialogCard.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $fade)
+    $ui.DialogScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $pop)
+    $ui.DialogScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $pop)
+}
+
+function New-InfoLine { param([string]$Glyph, [string]$Text, [string]$Color = '#A3ABB8')
+    $sp = New-Object System.Windows.Controls.StackPanel; $sp.Orientation = 'Horizontal'; $sp.Margin = [System.Windows.Thickness]::new(0, 0, 0, 6)
+    $g = New-Object System.Windows.Controls.TextBlock; $g.Text = $Glyph; $g.FontFamily = $window.FindResource('Icons'); $g.Foreground = Get-Brush $Color; $g.Margin = [System.Windows.Thickness]::new(0, 2, 10, 0)
+    $t = New-Object System.Windows.Controls.TextBlock; $t.Text = $Text; $t.Foreground = Get-Brush $Color; $t.TextWrapping = 'Wrap'; $t.TextTrimming = 'None'; $t.MaxWidth = 380
+    [void]$sp.Children.Add($g); [void]$sp.Children.Add($t); return $sp
+}
+
+# ------------------------------------------------------------------ restart
+function Get-Estimate {
+    if (-not $script:estimate) {
+        $servicing = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+        $script:estimate = Get-RestartEstimate -WithUpdates $servicing
+    }
+    return $script:estimate
+}
+
+function Get-EstimateText {
+    $e = Get-Estimate
+    $t = T 'restart.duration' @(Format-RestartEstimate -Estimate $e)
+    if ($e.WithUpdates) { $t += ' ' + (T 'restart.withUpdates') }
+    return $t
+}
+
+function Start-RestartNow {
+    if ($devMode) { return }
+    Invoke-RestartNow -Seconds 15 -Message (T 'toast.restartNow')
+    Show-Dialog -Title (T 'dlg.restartingTitle') -Text (T 'dlg.restartingText') -Glyph ([string][char]0xE777) -Colors @('#FFB020', '#FF6A3D') -Buttons @(
+        @{ Text = T 'dlg.cancelRestart'; Kind = 'Secondary'; Action = { & "$env:WINDIR\System32\shutdown.exe" /a; Update-RebootBanner } })
+}
+
+function Set-PlannedRestart { param([string]$Time)
+    if ($Time -notmatch '^([01]\d|2[0-3]):[0-5]\d$') { Show-Dialog -Title (T 'set.invalid' @($Time)) -Glyph ([string][char]0xE783) -Colors @('#FF6B6B', '#E0306E') -Buttons @(@{ Text = 'OK'; Kind = 'Secondary' }); return }
+    $at = Get-NextTimeOfDay -Time $Time
+    if (-not $devMode) { Register-RestartTask -At $at -Message (T 'toast.plannedRebootNow') }
+    Update-RebootBanner
+    Show-Dialog -Title (T 'dlg.plannedTitle' @(Format-At $at)) -Text (T 'dlg.plannedText') -Glyph ([string][char]0xE823) -Buttons @(@{ Text = 'OK'; Kind = 'Primary' })
+}
+
+function Show-RestartDialog { param($Plan)
+    $extra = @(New-InfoLine ([string][char]0xE916) (Get-EstimateText))
+    $planned = if ($devMode) { $null } else { Get-PlannedRestart }
+    if ($planned) { $extra += New-InfoLine ([string][char]0xE823) (T 'restart.plannedAt' @(Format-At $planned)) '#6FA8FF' }
+    if ($Plan -and $Plan.Mode -eq 'Auto') { $extra += New-InfoLine ([string][char]0xE7BA) (T 'restart.autoRunning') '#FFB340' }
+
+    # "restart at" row: time box + button
+    $row = New-Object System.Windows.Controls.Grid; $row.Margin = [System.Windows.Thickness]::new(0, 10, 0, 0)
+    $box = New-Object System.Windows.Controls.TextBox; $box.Width = 90; $box.HorizontalAlignment = 'Left'; $box.Text = $config.RebootTime
+    $plan = New-Object System.Windows.Controls.Button; $plan.Style = $window.FindResource('Secondary'); $plan.Margin = [System.Windows.Thickness]::new(100, 0, 0, 0)
+    $plan.Content = T 'dlg.restartAt'; $plan.Tag = $box
+    $plan.Add_Click({ param($s) $t = $s.Tag.Text.Trim(); Close-Dialog; Set-PlannedRestart -Time $t })
+    [void]$row.Children.Add($box); [void]$row.Children.Add($plan)
+    $extra += $row
+
+    $buttons = @(@{ Text = T 'dlg.restartNow'; Kind = 'Primary'; Action = { Start-RestartNow } })
+    if ($Plan -and $Plan.Mode -eq 'Auto') { $buttons += @{ Text = T 'dlg.cancelRestart'; Kind = 'Danger'; Action = { & "$env:WINDIR\System32\shutdown.exe" /a } } }
+    if ($planned) { $buttons += @{ Text = T 'dlg.cancelPlanned'; Kind = 'Danger'; Action = { Unregister-RestartTask; Update-RebootBanner } } }
+    $buttons += @{ Text = T 'dlg.later'; Kind = 'Ghost' }
+    Show-Dialog -Title (T 'dlg.restartTitle') -Text (T 'dlg.restartText') -Glyph ([string][char]0xE777) -Colors @('#FFB020', '#FF6A3D') -Buttons $buttons -Extra $extra
+}
+
+function Update-RebootBanner {
+    $planned = if ($devMode) { $null } else { Get-PlannedRestart }
+    $pending = Test-PendingReboot
+    $ui.RebootBanner.Visibility = if ($pending -or $planned) { 'Visible' } else { 'Collapsed' }
+    $ui.TxtRebootBanner.Text = if ($planned) { T 'restart.plannedAt' @(Format-At $planned) } else { T 'ov.rebootPending' }
+    $ui.TxtRebootBannerSub.Text = Get-EstimateText
+    $ui.BtnRestart.Content = T 'ov.restartOptions'
+}
 
 # ------------------------------------------------------------------ texts
 function Set-Texts {
     $ui.TxtNavOverview.Text = T 'nav.overview'; $ui.TxtNavUpdates.Text = T 'nav.updates'; $ui.TxtNavHistory.Text = T 'nav.history'
     $ui.TxtNavSettings.Text = T 'nav.settings'; $ui.TxtSidebarSub.Text = T 'app.subtitle'; $ui.TxtVersion.Text = "Version $version"
     $ui.BtnClose.ToolTip = T 'win.close'; $ui.BtnMin.ToolTip = T 'win.minimize'; $ui.BtnMax.ToolTip = T 'win.maximize'
-    $ui.BtnScan.Content = T 'ov.scan'; $ui.BtnCancel.Content = T 'ov.cancel'; $ui.BtnRestart.Content = T 'ov.restartNow'
-    $ui.TxtRebootBanner.Text = T 'ov.rebootPending'
+    $ui.TxtOverviewTitle.Text = T 'nav.overview'
+    $ui.BtnScan.Content = T 'ov.scan'; $ui.BtnCancel.Content = T 'ov.cancel'
     foreach ($p in 'Critical', 'Important', 'Normal', 'Optional') { $ui["LblTile$p"].Text = T "prio.$p" }
     $ui.LblLastScan.Text = T 'ov.lastScan'; $ui.LblLastRun.Text = T 'ov.lastRun'; $ui.LblNext.Text = T 'ov.nextRun'
     $ui.LblLog.Text = T 'ov.log'; $ui.BtnToggleLog.Content = if ($ui.LogList.Visibility -eq 'Visible') { T 'ov.hideLog' } else { T 'ov.showLog' }
@@ -644,20 +258,23 @@ function Set-Texts {
     $ui.ColSource.Header = T 'rep.colSource'; $ui.ColName.Header = T 'rep.colName'; $ui.ColFrom.Header = T 'rep.colFrom'
     $ui.ColTo.Header = T 'rep.colTo'; $ui.ColStatus.Header = T 'rep.colStatus'; $ui.ColNote.Header = T 'rep.colNote'
     $ui.TxtSettingsTitle.Text = T 'nav.settings'
-    $ui.LblAuto.Text = T 'set.auto'; $ui.LblSchType.Text = T 'set.scheduleType'; $ui.LblDay.Text = T 'set.day'; $ui.LblDom.Text = T 'set.dayOfMonth'
+    $ui.LblAuto.Text = (T 'set.auto').ToUpper(); $ui.LblSchType.Text = T 'set.scheduleType'; $ui.LblDay.Text = T 'set.day'; $ui.LblDom.Text = T 'set.dayOfMonth'
     $ui.LblTime.Text = T 'set.time'; $ui.LblAction.Text = T 'set.action'; $ui.RbActInstall.Content = T 'set.act.Install'; $ui.RbActNotify.Content = T 'set.act.Notify'
     $ui.LblAutoPrio.Text = T 'set.autoPrio'
     foreach ($p in 'Critical', 'Important', 'Normal', 'Optional') { $ui["ChkPrio$p"].Content = T "prio.$p" }
     $ui.ChkWake.Content = T 'set.wake'
-    $ui.LblBehavior.Text = T 'set.behavior'; $ui.LblMode2.Text = T 'set.mode'; $ui.RbVisible.Content = T 'set.mode.Visible'; $ui.RbSilent.Content = T 'set.mode.Silent'
-    $ui.ChkParallel.Content = T 'set.parallel'; $ui.ChkRestore.Content = T 'set.restore'; $ui.LblReboot.Text = T 'set.reboot'; $ui.LblLang.Text = T 'set.language'
-    $ui.LblSources.Text = T 'set.sources'; $ui.LblExcl.Text = T 'set.exclusions'; $ui.TxtExclHint.Text = T 'set.exclHint'; $ui.BtnExclAdd.Content = T 'set.exclAdd'
-    $ui.LblSelf.Text = T 'set.selfTitle'; $ui.ChkSelf.Content = T 'set.selfUpdate'; $ui.LblRepo.Text = T 'set.selfRepo'
+    $ui.LblRestartSection.Text = (T 'set.restartSection').ToUpper(); $ui.LblReboot.Text = T 'set.reboot'; $ui.LblRebootTime.Text = T 'set.rebootTime'
+    $ui.LblBehavior.Text = (T 'set.behavior').ToUpper(); $ui.LblMode2.Text = T 'set.mode'; $ui.RbVisible.Content = T 'set.mode.Visible'; $ui.RbSilent.Content = T 'set.mode.Silent'
+    $ui.ChkParallel.Content = T 'set.parallel'; $ui.ChkRestore.Content = T 'set.restore'; $ui.LblLang.Text = T 'set.language'
+    $ui.LblSources.Text = (T 'set.sources').ToUpper(); $ui.LblExcl.Text = (T 'set.exclusions').ToUpper(); $ui.TxtExclHint.Text = T 'set.exclHint'; $ui.BtnExclAdd.Content = T 'set.exclAdd'
+    $ui.LblSelf.Text = (T 'set.selfTitle').ToUpper(); $ui.ChkSelf.Content = T 'set.selfUpdate'; $ui.LblRepo.Text = T 'set.selfRepo'
     foreach ($k in $sourceKeys) { $sourceBoxes[$k].Content = T "set.src.$k" }
+    $e = Get-Estimate
+    $ui.TxtRestartEstimate.Text = if ($e.Measured) { T 'set.estimateMeasured' @((Format-RestartEstimate -Estimate (Get-RestartEstimate -WithUpdates $false)), $e.Samples) } else { T 'set.estimateDefault' }
 
     $script:loading = $true
     $ui.CmbSchedule.Items.Clear(); foreach ($s in 'Manual', 'Daily', 'Weekly', 'BiWeekly', 'Monthly') { [void]$ui.CmbSchedule.Items.Add((New-ComboItem $s (T "set.sch.$s"))) }
-    $ui.CmbReboot.Items.Clear(); foreach ($s in 'Prompt', 'Never', 'Auto') { [void]$ui.CmbReboot.Items.Add((New-ComboItem $s (T "set.reboot.$s"))) }
+    $ui.CmbReboot.Items.Clear(); foreach ($s in 'Prompt', 'Auto', 'Scheduled', 'Never') { [void]$ui.CmbReboot.Items.Add((New-ComboItem $s (T "set.reboot.$s"))) }
     $culture = if ((Get-CurrentLanguage) -eq 'de') { [Globalization.CultureInfo]'de-DE' } else { [Globalization.CultureInfo]'en-US' }
     $ui.CmbDay.Items.Clear(); foreach ($d in 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday') {
         [void]$ui.CmbDay.Items.Add((New-ComboItem $d $culture.DateTimeFormat.GetDayName([DayOfWeek]$d))) }
@@ -665,11 +282,15 @@ function Set-Texts {
 }
 
 function Initialize-Controls {
+    $last = $sourceKeys[-1]
     foreach ($k in $sourceKeys) {
+        $row = New-Object System.Windows.Controls.Border
+        $row.Style = $window.FindResource($(if ($k -eq $last) { 'RowLast' } else { 'Row' }))
         $cb = New-Object System.Windows.Controls.CheckBox
         $cb.Style = $window.FindResource('Toggle')
-        if ($k -in 'WingetIncludeUnknown', 'WindowsUpdateDrivers', 'MicrosoftUpdate') { $cb.Margin = [System.Windows.Thickness]::new(24, 7, 0, 7); $cb.Foreground = Get-Brush '#C7CBD3' }
-        $sourceBoxes[$k] = $cb; [void]$ui.SourcePanel.Children.Add($cb)
+        if ($k -in 'WingetIncludeUnknown', 'WindowsUpdateDrivers', 'MicrosoftUpdate') { $row.Padding = [System.Windows.Thickness]::new(42, 11, 18, 11); $cb.Foreground = Get-Brush '#B8C0CC' }
+        $row.Child = $cb
+        $sourceBoxes[$k] = $cb; $sourceRows[$k] = $row; [void]$ui.SourcePanel.Children.Add($row)
         $cb.Add_Click({ Save-Settings })
     }
     $ui.CmbDom.Items.Clear(); 1..28 | ForEach-Object { [void]$ui.CmbDom.Items.Add((New-ComboItem $_ "$_.")) }
@@ -685,6 +306,7 @@ function Show-Config {
     Select-ComboTag $ui.CmbReboot $config.Reboot
     Select-ComboTag $ui.CmbLang $config.Language
     $ui.TxtTime.Text = $config.Schedule.Time
+    $ui.TxtRebootTime.Text = $config.RebootTime
     $ui.ChkWake.IsChecked = [bool]$config.Schedule.WakeToRun
     $ui.RbActInstall.IsChecked = ($config.ScheduleAction -eq 'Install'); $ui.RbActNotify.IsChecked = ($config.ScheduleAction -eq 'Notify')
     foreach ($p in 'Critical', 'Important', 'Normal', 'Optional') { $ui["ChkPrio$p"].IsChecked = (@($config.AutoInstallPriorities) -contains $p) }
@@ -704,11 +326,22 @@ function Update-SettingsUi {
     $ui.PnlTime.Visibility = if ($type -eq 'Manual') { 'Collapsed' } else { 'Visible' }
     $ui.PnlAutoDetails.Visibility = $ui.PnlTime.Visibility
     $ui.PnlAutoPrio.Visibility = if ($ui.RbActInstall.IsChecked) { 'Visible' } else { 'Collapsed' }
-    foreach ($k in 'WingetIncludeUnknown') { $sourceBoxes[$k].IsEnabled = [bool]$sourceBoxes['Winget'].IsChecked }
+    $reboot = if ($ui.CmbReboot.SelectedItem) { [string]$ui.CmbReboot.SelectedItem.Tag } else { 'Prompt' }
+    $ui.PnlRebootTime.Visibility = if ($reboot -eq 'Scheduled') { 'Visible' } else { 'Collapsed' }
+    $sourceBoxes['WingetIncludeUnknown'].IsEnabled = [bool]$sourceBoxes['Winget'].IsChecked
     foreach ($k in 'WindowsUpdateDrivers', 'MicrosoftUpdate') { $sourceBoxes[$k].IsEnabled = [bool]$sourceBoxes['WindowsUpdate'].IsChecked }
     $repo = $ui.TxtRepo.Text.Trim()
     $ui.ChkSelf.IsEnabled = [bool]$repo
     $ui.TxtSelfStatus.Text = if ($repo) { T 'set.selfReady' @($repo) } else { T 'set.selfMissing' }
+}
+
+function Show-Saved { param([string]$Text, [string]$Color = '#5BE584')
+    $ui.TxtSaved.Text = $Text; $ui.TxtSaved.Foreground = Get-Brush $Color
+    $a = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+    foreach ($kf in @(@(0, 0), @(150, 1), @(1800, 1), @(2300, 0))) {
+        [void]$a.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame($kf[1], [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds($kf[0])))))
+    }
+    $ui.SavedPill.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $a)
 }
 
 function Save-Settings {
@@ -727,10 +360,12 @@ function Save-Settings {
         $c.Parallel = [bool]$ui.ChkParallel.IsChecked
         $c.RestorePoint = [bool]$ui.ChkRestore.IsChecked
         $c.Reboot = [string]$ui.CmbReboot.SelectedItem.Tag
+        $c.RebootTime = $ui.TxtRebootTime.Text.Trim()
         foreach ($k in $sourceKeys) { $c.Sources.$k = [bool]$sourceBoxes[$k].IsChecked }
         $c.Language = [string]$ui.CmbLang.SelectedItem.Tag
         $c.SelfUpdate.Repo = $ui.TxtRepo.Text.Trim()
         $c.SelfUpdate.Enabled = [bool]$ui.ChkSelf.IsChecked -and [bool]$c.SelfUpdate.Repo
+        if ($devMode) { $script:config = $c; Show-Saved (T 'set.saved'); return }
         Save-Config -Config $c
         $scheduleChanged = ($c.Schedule | ConvertTo-Json -Compress) -ne ($script:config.Schedule | ConvertTo-Json -Compress)
         if ($scheduleChanged) { Register-ScheduleTask -Config $c }
@@ -738,10 +373,9 @@ function Save-Settings {
         $script:config = $c
         if ($langChanged) { Import-I18n -Language $c.Language; Set-Texts; Show-Config; Update-RowTexts }
         Show-Summary
-        $ui.TxtSaved.Foreground = Get-Brush '#30D158'; $ui.TxtSaved.Text = T 'set.saved'
+        Show-Saved (T 'set.saved')
     } catch {
-        $ui.TxtSaved.Foreground = Get-Brush '#FF453A'
-        $ui.TxtSaved.Text = T 'set.invalid' @($_.Exception.Message)
+        Show-Saved (T 'set.invalid' @($_.Exception.Message)) '#FF6B61'
     }
 }
 
@@ -753,7 +387,7 @@ function Set-Exclusion {
     $list = [System.Collections.Generic.List[string]]@($c.ExcludedPackages)
     if ($Exclude) { if (-not $list.Contains($Id)) { $list.Add($Id) } } else { [void]$list.Remove($Id) }
     $c.ExcludedPackages = $list.ToArray()
-    try { Save-Config -Config $c } catch { $ui.TxtSaved.Text = T 'set.invalid' @($_.Exception.Message); return }
+    if (-not $devMode) { try { Save-Config -Config $c } catch { Show-Saved (T 'set.invalid' @($_.Exception.Message)) '#FF6B61'; return } }
     $script:config = $c
     $ui.ExclChips.ItemsSource = @($c.ExcludedPackages)
     foreach ($r in $rows) { Update-RowExclusion $r }
@@ -782,7 +416,7 @@ function Set-RowGroup { param($Row)
 function Set-RowState { param($Row, [string]$State)
     $Row.State = $State
     $Row.StateText = if ($State) { T "state.$State" } else { '' }
-    $Row.StateBrush = if ($State -and $stateColors.ContainsKey($State)) { $stateColors[$State] } else { '#8E949F' }
+    $Row.StateBrush = if ($State -and $stateColors.ContainsKey($State)) { $stateColors[$State] } else { '#8A93A1' }
 }
 
 function New-Row { param($Item, [bool]$IsUpdate)
@@ -860,7 +494,7 @@ function Update-Counts {
     foreach ($p in 'Critical', 'Important', 'Normal', 'Optional') { $ui["TxtTile$p"].Text = [string]@($upd | Where-Object { $_.Priority -eq $p }).Count }
     $ui.Badge.Visibility = if ($upd.Count) { 'Visible' } else { 'Collapsed' }
     $ui.TxtBadge.Text = [string]$upd.Count
-    $ui.Badge.Background = Get-Brush $(if (@($upd | Where-Object { $_.Priority -eq 'Critical' }).Count) { '#FF453A' } else { '#0A84FF' })
+    $ui.Badge.Background = Get-Brush $(if (@($upd | Where-Object { $_.Priority -eq 'Critical' }).Count) { '#FF453A' } else { '#3D7BFF' })
     $sel = @($rows | Where-Object { $_.Selected -and $_.Selectable })
     $ui.TxtSelected.Text = T 'up.selected' @($sel.Count)
     $ui.BtnInstallSelected.Content = T 'up.installSelected' @($sel.Count)
@@ -877,9 +511,9 @@ function Update-Counts {
 function Update-Empty {
     $visible = 0; foreach ($r in $view) { $visible++; break }
     $ui.EmptyPanel.Visibility = if ($visible) { 'Collapsed' } else { 'Visible' }
-    if ($script:running -and $script:runMode -eq 'scan') { $ui.TxtEmpty.Text = T 'up.scanning'; $ui.EmptyGlyph.Text = [string][char]0xE895; $ui.EmptyGlyph.Foreground = Get-Brush '#0A84FF' }
-    elseif ($script:search) { $ui.TxtEmpty.Text = T 'up.noMatch' @($script:search); $ui.EmptyGlyph.Text = [string][char]0xE721; $ui.EmptyGlyph.Foreground = Get-Brush '#8E949F' }
-    elseif (-not $script:scanAt) { $ui.TxtEmpty.Text = T 'up.notScanned'; $ui.EmptyGlyph.Text = [string][char]0xE895; $ui.EmptyGlyph.Foreground = Get-Brush '#8E949F' }
+    if ($script:running -and $script:runMode -eq 'scan') { $ui.TxtEmpty.Text = T 'up.scanning'; $ui.EmptyGlyph.Text = [string][char]0xE895; $ui.EmptyGlyph.Foreground = Get-Brush '#6FA8FF' }
+    elseif ($script:search) { $ui.TxtEmpty.Text = T 'up.noMatch' @($script:search); $ui.EmptyGlyph.Text = [string][char]0xE721; $ui.EmptyGlyph.Foreground = Get-Brush '#8A93A1' }
+    elseif (-not $script:scanAt) { $ui.TxtEmpty.Text = T 'up.notScanned'; $ui.EmptyGlyph.Text = [string][char]0xE895; $ui.EmptyGlyph.Foreground = Get-Brush '#8A93A1' }
     else { $ui.TxtEmpty.Text = T 'up.allCurrent'; $ui.EmptyGlyph.Text = [string][char]0xE73E; $ui.EmptyGlyph.Foreground = Get-Brush '#30D158' }
 }
 
@@ -888,16 +522,17 @@ function Update-Hero {
     $spin = $window.FindResource('Spin')
     if ($script:running) {
         $ui.TxtState.Text = if ($script:runMode -eq 'scan') { T 'ov.scanning' } else { T 'ov.running' }
-        $ui.StateGlyph.Visibility = 'Collapsed'; $ui.StateCircle.Fill = Get-Brush '#0A84FF'; $ui.Spinner.Visibility = 'Visible'
-        $spin.Begin($window, $true)
+        $ui.TxtSub.Text = if ($script:runMode -eq 'scan') { T 'ov.scanningSub' } else { T 'ov.runningSub' }
+        $ui.StateCircle.Fill = Get-Brush '#3D7BFF'; $ui.StateGlyph.Text = [string][char]0xE895
+        $ui.Spinner.Visibility = 'Visible'; $spin.Begin($window, $true)
     } else {
-        $spin.Stop($window); $ui.Spinner.Visibility = 'Collapsed'; $ui.StateGlyph.Visibility = 'Visible'
+        $spin.Stop($window); $ui.Spinner.Visibility = 'Collapsed'
         $n = @($rows | Where-Object { $_.IsUpdate -and -not $_.Excluded -and -not $_.IsCheck }).Count
         $crit = @($rows | Where-Object { $_.IsUpdate -and -not $_.Excluded -and $_.Priority -eq 'Critical' }).Count
-        if (-not $script:scanAt) { $ui.TxtState.Text = T 'ov.ready'; $col = '#8E949F'; $ui.StateGlyph.Text = [string][char]0xE895 }
+        if (-not $script:scanAt) { $ui.TxtState.Text = T 'ov.ready'; $col = '#8A93A1'; $ui.StateGlyph.Text = [string][char]0xE895 }
         elseif ($n -eq 0) { $ui.TxtState.Text = T 'ov.allCurrent'; $col = '#30D158'; $ui.StateGlyph.Text = [string][char]0xE73E }
-        else { $ui.TxtState.Text = T 'ov.available' @($n); $col = if ($crit) { '#FF453A' } else { '#0A84FF' }; $ui.StateGlyph.Text = [string][char]0xE896 }
-        $ui.StateGlyph.Foreground = Get-Brush $col; $ui.StateCircle.Fill = Get-Brush $col
+        else { $ui.TxtState.Text = T 'ov.available' @($n); $col = if ($crit) { '#FF453A' } else { '#3D7BFF' }; $ui.StateGlyph.Text = [string][char]0xE896 }
+        $ui.StateCircle.Fill = Get-Brush $col
         $ui.TxtSub.Text = if ($crit) { T 'ov.criticalHint' @($crit) } else { T 'ov.lastScanLine' @(Format-When $script:scanAt) }
     }
     $ui.BtnScan.Visibility = if ($script:running) { 'Collapsed' } else { 'Visible' }
@@ -910,7 +545,7 @@ function Show-Summary {
     $ui.TxtNext.Text = if ($config.Schedule.Type -eq 'Manual') { T 'ov.manualOnly' } elseif ($next) { $next.ToString('ddd, dd.MM.  HH:mm') } else { '-' }
     $last = Get-LastReport
     $ui.TxtLastRun.Text = if ($last -and -not $last.DryRun) { Format-When ([datetime]::Parse($last.EndedAt)) } else { T 'ov.never' }
-    $ui.RebootBanner.Visibility = if (Test-PendingReboot) { 'Visible' } else { 'Collapsed' }
+    Update-RebootBanner
     Update-Counts
 }
 
@@ -964,7 +599,10 @@ function Test-EngineRunning {
 
 function Start-Engine {
     param([ValidateSet('scan', 'install')][string]$Mode, [string[]]$Keys)
-    if (Test-EngineRunning) { [System.Windows.MessageBox]::Show((T 'ov.alreadyRunning'), 'ALERION Update') | Out-Null; return }
+    if ($devMode) { return }
+    if (Test-EngineRunning) {
+        Show-Dialog -Title (T 'ov.alreadyRunning') -Glyph ([string][char]0xE895) -Buttons @(@{ Text = 'OK'; Kind = 'Secondary' }); return
+    }
     $engine = Join-Path $src 'UpdateEngine.ps1'
     $a = "--headless `"$PSHOME\powershell.exe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$engine`" -FromGui"
     if ($Mode -eq 'scan') { $a += ' -Scan' }
@@ -988,9 +626,23 @@ function Start-Install { param([object[]]$Selected)
     Show-Page 'Overview'
 }
 
-function Confirm-Reboot {
-    $r = [System.Windows.MessageBox]::Show((T 'dlg.rebootText'), (T 'dlg.rebootTitle'), 'YesNo', 'Question')
-    if ($r -eq 'Yes') { Restart-Computer -Force }
+function Complete-InstallRun {
+    <# After an install: history, restart handling (in-app), fresh scan. #>
+    Show-Summary; Show-History; Show-Page 'History'; [void]$window.Activate()
+    $rep = Get-LastReport
+    if ($rep -and $rep.RebootRequired -and -not $rep.DryRun) {
+        $plan = if ($rep.PSObject.Properties.Name -contains 'RestartPlan') { $rep.RestartPlan } else { $null }
+        $script:estimate = $null
+        if ($plan -and $plan.Mode -eq 'Scheduled' -and $plan.At) {
+            Show-Dialog -Title (T 'dlg.plannedTitle' @(Format-At ([datetime]$plan.At))) -Text (T 'dlg.plannedAfterRun') -Glyph ([string][char]0xE823) -Buttons @(
+                @{ Text = 'OK'; Kind = 'Primary' }, @{ Text = T 'ov.restartOptions'; Kind = 'Secondary'; Action = { Show-RestartDialog $null } })
+        } elseif ($plan -and $plan.Mode -eq 'Never') {
+            Update-RebootBanner
+        } else {
+            Show-RestartDialog $plan
+        }
+    }
+    Start-Engine -Mode scan   # refresh the list after installing
 }
 
 # ------------------------------------------------------------------ polling
@@ -1018,14 +670,7 @@ $timer.Add_Tick({
     } elseif ($script:wasRunning) {
         $finishedMode = $script:runMode
         $script:wasRunning = $false; $script:running = $false; $script:runMode = ''
-        if ($finishedMode -eq 'scan') {
-            Import-Scan; Show-Summary
-        } else {
-            Show-Summary; Show-History; Show-Page 'History'; [void]$window.Activate()
-            $rep = Get-LastReport
-            if ($rep -and $rep.RebootRequired -and -not $rep.DryRun -and $config.Reboot -eq 'Prompt') { Confirm-Reboot }
-            Start-Engine -Mode scan   # refresh the list after installing
-        }
+        if ($finishedMode -eq 'scan') { Import-Scan; Show-Summary } else { Complete-InstallRun }
     }
 })
 
@@ -1033,18 +678,19 @@ $timer.Add_Tick({
 $ui.BtnClose.Add_Click({ $window.Close() })
 $ui.BtnMin.Add_Click({ $window.WindowState = 'Minimized' })
 $ui.BtnMax.Add_Click({ $window.WindowState = if ($window.WindowState -eq 'Maximized') { 'Normal' } else { 'Maximized' } })
-$window.Add_StateChanged({ $window.BorderThickness = if ($window.WindowState -eq 'Maximized') { 7 } else { 0 } })
+$window.Add_StateChanged({ $ui.Root.Margin = if ($window.WindowState -eq 'Maximized') { [System.Windows.Thickness]::new(7) } else { [System.Windows.Thickness]::new(0) } })
 $ui.NavOverview.Add_Checked({ Show-Page 'Overview' })
 $ui.NavUpdates.Add_Checked({ Show-Page 'Updates' })
 $ui.NavHistory.Add_Checked({ Show-Page 'History'; Show-History })
-$ui.NavSettings.Add_Checked({ Show-Page 'Settings'; $ui.TxtSaved.Text = '' })
+$ui.NavSettings.Add_Checked({ Show-Page 'Settings' })
 
 $ui.BtnScan.Add_Click({ Start-Engine -Mode scan })
 $ui.BtnCancel.Add_Click({ Request-Cancel; $ui.BtnCancel.IsEnabled = $false; $ui.TxtCurrent.Text = T 'ov.cancelling' })
 $ui.BtnRecommended.Add_Click({ Start-Install @($rows | Where-Object { $_.Selectable -and $_.Priority -ne 'Optional' }) })
 $ui.BtnInstallSelected.Add_Click({ Start-Install @($rows | Where-Object { $_.Selected -and $_.Selectable }) })
 $ui.BtnSelectNone.Add_Click({ foreach ($r in $rows) { $r.Selected = $false }; Update-Counts })
-$ui.BtnRestart.Add_Click({ Confirm-Reboot })
+$ui.BtnRestart.Add_Click({ Show-RestartDialog $null })
+$ui.DialogLayer.Add_MouseLeftButtonDown({ param($s, $e) if ($e.OriginalSource -eq $ui.DialogLayer) { Close-Dialog } })
 $ui.BtnToggleLog.Add_Click({
     $ui.LogList.Visibility = if ($ui.LogList.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' }
     $ui.BtnToggleLog.Content = if ($ui.LogList.Visibility -eq 'Visible') { T 'ov.hideLog' } else { T 'ov.showLog' }
@@ -1089,28 +735,36 @@ $ui.BtnHtml.Add_Click({ $r = $script:shownReport; if ($r -and (Test-Path $r.Html
 foreach ($c in 'CmbSchedule', 'CmbDay', 'CmbDom', 'CmbReboot', 'CmbLang') { $ui[$c].Add_SelectionChanged({ Save-Settings }) }
 foreach ($c in 'ChkWake', 'ChkParallel', 'ChkRestore', 'ChkSelf', 'ChkPrioCritical', 'ChkPrioImportant', 'ChkPrioNormal', 'ChkPrioOptional') { $ui[$c].Add_Click({ Save-Settings }) }
 foreach ($c in 'RbActInstall', 'RbActNotify', 'RbVisible', 'RbSilent') { $ui[$c].Add_Checked({ Save-Settings }) }
-foreach ($c in 'TxtTime', 'TxtRepo') {
+foreach ($c in 'TxtTime', 'TxtRepo', 'TxtRebootTime') {
     $ui[$c].Add_LostFocus({ Save-Settings })
     $ui[$c].Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { Save-Settings } })
 }
 $ui.TxtRepo.Add_TextChanged({ Update-SettingsUi })
 
-# keyboard: Ctrl+F search, F5 rescan, Esc clears search
+# keyboard: Ctrl+F search, F5 rescan, Esc closes dialog / clears search
 $window.Add_PreviewKeyDown({
     param($s, $e)
-    if ($e.Key -eq 'F' -and [System.Windows.Input.Keyboard]::Modifiers -eq 'Control') { Show-Page 'Updates'; [void]$ui.TxtSearch.Focus(); $e.Handled = $true }
+    if ($e.Key -eq 'Escape' -and $ui.DialogLayer.Visibility -eq 'Visible') { Close-Dialog; $e.Handled = $true }
+    elseif ($e.Key -eq 'F' -and [System.Windows.Input.Keyboard]::Modifiers -eq 'Control') { Show-Page 'Updates'; [void]$ui.TxtSearch.Focus(); $e.Handled = $true }
     elseif ($e.Key -eq 'F5' -and -not $script:running) { Start-Engine -Mode scan; $e.Handled = $true }
     elseif ($e.Key -eq 'Escape' -and $ui.TxtSearch.IsKeyboardFocused) { $ui.TxtSearch.Text = '' }
 })
 $window.Add_Closed({ $timer.Stop(); try { $guiMutex.ReleaseMutex() } catch { } })
 
+# ------------------------------------------------------------------ dev aids
+function Invoke-DevDialog {
+    if ($Dialog -eq 'Restart') { Show-RestartDialog $null }
+    elseif ($Dialog -eq 'Info') { Show-Dialog -Title (T 'ov.alreadyRunning') -Glyph ([string][char]0xE895) -Buttons @(@{ Text = 'OK'; Kind = 'Secondary' }) }
+}
+
 function Invoke-Snapshot {
-    if ($Page -eq 'Settings') { $window.Height = 1700 }
     $window.WindowStartupLocation = 'Manual'; $window.Left = -4000; $window.Top = 0; $window.ShowInTaskbar = $false
+    if ($Page -eq 'Settings') { $window.Height = 1900 }
     $window.Add_ContentRendered({
         Show-Page $Page; if ($Page -eq 'History') { Show-History }
         if ($Query) { $ui.TxtSearch.Text = $Query }
-        $t = New-Object System.Windows.Threading.DispatcherTimer; $t.Interval = [TimeSpan]::FromMilliseconds(700)
+        Invoke-DevDialog
+        $t = New-Object System.Windows.Threading.DispatcherTimer; $t.Interval = [TimeSpan]::FromMilliseconds(900)
         $t.Add_Tick({
             $t.Stop()
             $bmp = New-Object System.Windows.Media.Imaging.RenderTargetBitmap([int]$window.ActualWidth, [int]$window.ActualHeight, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
@@ -1130,11 +784,16 @@ Set-Texts
 Show-Config
 Import-Scan
 Show-Summary
+if ($Snapshot) { Invoke-Snapshot; return }
+if ($Preview) {
+    if ($X -ge 0) { $window.WindowStartupLocation = 'Manual'; $window.Left = $X; $window.Top = $Y }
+    $window.Add_ContentRendered({ Show-Page $Page; if ($Page -eq 'History') { Show-History }; if ($Query) { $ui.TxtSearch.Text = $Query }; Invoke-DevDialog })
+    [void]$window.ShowDialog(); return
+}
 if (Test-EngineRunning) {
     $st = Get-Status; $script:running = $true; $script:wasRunning = $true; $script:runMode = [string]$st.Mode; Update-Counts
-} elseif (-not $Snapshot -and (-not $script:scanAt -or ((Get-Date) - $script:scanAt).TotalMinutes -gt 30)) {
+} elseif (-not $script:scanAt -or ((Get-Date) - $script:scanAt).TotalMinutes -gt 30) {
     Start-Engine -Mode scan   # fresh list on open
 }
-if ($Snapshot) { Invoke-Snapshot; return }
 $timer.Start()
 [void]$window.ShowDialog()
