@@ -173,6 +173,7 @@ function Test-Config {
     if ([int]$Config.Schedule.DayOfMonth -lt 1 -or [int]$Config.Schedule.DayOfMonth -gt 28) { $errors.Add("Schedule.DayOfMonth must be 1-28") }
     if ([int]$Config.WaitWhileBusyMinutes -lt 0 -or [int]$Config.WaitWhileBusyMinutes -gt 1440) { $errors.Add("WaitWhileBusyMinutes must be 0-1440") }
     if ($Config.SelfUpdate.Repo -and $Config.SelfUpdate.Repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { $errors.Add("SelfUpdate.Repo must be 'owner/name'") }
+    if ($Config.CheckInterval -notin @('Off', '1h', '3h', '6h', '12h', '24h')) { $errors.Add("CheckInterval must be Off, 1h, 3h, 6h, 12h or 24h") }
     if ($Config.ScheduleAction -notin @('Install', 'Notify')) { $errors.Add("ScheduleAction must be Install or Notify") }
     foreach ($p in @($Config.AutoInstallPriorities)) {
         if ($p -notin (Get-PriorityNames)) { $errors.Add("AutoInstallPriorities contains unknown priority: $p") }
@@ -196,6 +197,8 @@ function Get-Config {
         $cfg.SchemaVersion = 2
         if (Test-IsAdmin) { try { Save-Config -Config $cfg } catch { Write-Log -Level WARN -Message "Config migration not saved: $($_.Exception.Message)" } }
     }
+    # The GitHub repository was renamed (old name still redirects, but use the new one).
+    if ($cfg.SelfUpdate.Repo -eq 'P3rc1v4l/ALERION-Update') { $cfg.SelfUpdate.Repo = 'P3rc1v4l/UpdateCenter' }
     $problems = Test-Config $cfg
     if ($problems.Count -gt 0) {
         Write-Log -Level WARN -Message ("Invalid config, falling back to defaults: " + ($problems -join '; '))

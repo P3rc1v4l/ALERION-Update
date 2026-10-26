@@ -15,7 +15,7 @@ param(
     [string]$Snapshot,
     [string]$UiTest,
     [switch]$Preview,
-    [ValidateSet('Overview', 'Updates', 'History', 'Settings')][string]$Page = 'Overview',
+    [ValidateSet('Overview', 'Updates', 'Programs', 'Cleanup', 'Security', 'History', 'Settings')][string]$Page = 'Overview',
     [string]$Query,
     [switch]$Minimized,
     [ValidateSet('', 'Restart', 'Info')][string]$Dialog = '',
@@ -65,7 +65,7 @@ $guiMutex = New-Object System.Threading.Mutex($false, 'Local\UpdateCenter-GUI')
 if (-not $devMode -and -not $guiMutex.WaitOne(0)) { [void]$showEvent.Set(); exit 0 }
 
 if (-not ('Alerion.UpdateRow' -as [type])) {
-    Add-Type -TypeDefinition (Get-Content (Join-Path $src 'GuiModel.cs') -Raw)
+    Add-Type -TypeDefinition (Get-Content (Join-Path $src 'GuiModel.cs') -Raw) -ReferencedAssemblies PresentationCore, WindowsBase, System.Xaml
 }
 
 Initialize-DataDir -Harden
@@ -90,6 +90,7 @@ $brushConverter = New-Object System.Windows.Media.BrushConverter
 function Get-Brush { param([string]$Hex) $brushConverter.ConvertFromString($Hex) }
 
 # The window is opaque with its own rounded frame + shadow (Gui.xaml); no DWM glass any more.
+$window.Add_SourceInitialized({ [Alerion.WindowFix]::Attach((New-Object System.Windows.Interop.WindowInteropHelper $window).Handle) })
 
 # ------------------------------------------------------------------ state
 $prioColors  = @{ Critical = '#FF453A'; Important = '#FF9F0A'; Normal = '#3D7BFF'; Optional = '#8A93A1' }
@@ -150,8 +151,8 @@ function Show-Dialog {
         $btn.Style = $window.FindResource($(if ($b.Kind) { $b.Kind } else { 'Secondary' }))
         $btn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 8)
         $btn.HorizontalAlignment = 'Stretch'
-        $btn.Tag = $b.Action
-        $btn.Add_Click({ param($s) $action = $s.Tag; Close-Dialog; if ($action) { & $action } })
+        $btn.Tag = @{ Action = $b.Action; Context = $b.Context }
+        $btn.Add_Click({ param($s) $tag = $s.Tag; Close-Dialog; if ($tag.Action) { & $tag.Action $tag.Context } })
         [void]$ui.DlgButtons.Children.Add($btn)
     }
     $ui.DialogLayer.Visibility = 'Visible'
@@ -238,6 +239,13 @@ function Update-RebootBanner {
 # ------------------------------------------------------------------ texts
 function Set-Texts {
     $ui.TxtNavOverview.Text = T 'nav.overview'; $ui.TxtNavUpdates.Text = T 'nav.updates'; $ui.TxtNavHistory.Text = T 'nav.history'
+    $ui.TxtNavPrograms.Text = T 'nav.programs'; $ui.TxtNavCleanup.Text = T 'nav.cleanup'; $ui.TxtNavSecurity.Text = T 'nav.security'
+    $ui.TxtProgramsTitle.Text = T 'nav.programs'; $ui.TxtProgSearchHint.Text = T 'pg.search'; $ui.SegProgAll.Content = T 'pg.segAll'; $ui.SegProgProtected.Content = T 'pg.segProtected'
+    $ui.BtnProgRefresh.Content = T 'pg.refresh'; $ui.TxtProgramsSub.Text = T 'pg.subIntro'
+    $ui.CmbProgSort.Items.Clear(); foreach ($s in 'name', 'size', 'date') { [void]$ui.CmbProgSort.Items.Add((New-ComboItem $s (T "pg.sort.$s"))) }; $ui.CmbProgSort.SelectedIndex = 0
+    $ui.TxtCleanupTitle.Text = T 'nav.cleanup'; $ui.TxtCleanupSub.Text = T 'cl.sub'; $ui.BtnCleanupScan.Content = T 'cl.scan'
+    $ui.TxtSecurityTitle.Text = T 'nav.security'; $ui.BtnSecRefresh.Content = T 'sec.refresh'; $ui.LblSecScans.Text = (T 'pg.secScans').ToUpper(); $ui.LblSecStatus.Text = (T 'pg.secStatus').ToUpper(); $ui.LblSecThreats.Text = (T 'sec.history').ToUpper()
+    Set-ScanTexts
     $ui.TxtNavSettings.Text = T 'nav.settings'; $ui.TxtSidebarSub.Text = T 'app.subtitle'; $ui.TxtVersion.Text = "Version $version"
     $ui.BtnClose.ToolTip = T 'win.close'; $ui.BtnMin.ToolTip = T 'win.minimize'; $ui.BtnMax.ToolTip = T 'win.maximize'
     $ui.TxtOverviewTitle.Text = T 'nav.overview'
@@ -253,6 +261,7 @@ function Set-Texts {
     $ui.ColSource.Header = T 'rep.colSource'; $ui.ColName.Header = T 'rep.colName'; $ui.ColFrom.Header = T 'rep.colFrom'
     $ui.ColTo.Header = T 'rep.colTo'; $ui.ColStatus.Header = T 'rep.colStatus'; $ui.ColNote.Header = T 'rep.colNote'
     $ui.TxtSettingsTitle.Text = T 'nav.settings'
+    $ui.LblCheck.Text = T 'set.check'; $ui.TxtCheckHint.Text = T 'set.checkHint'
     $ui.LblAuto.Text = (T 'set.auto').ToUpper(); $ui.LblSchType.Text = T 'set.scheduleType'; $ui.LblDay.Text = T 'set.day'; $ui.LblDom.Text = T 'set.dayOfMonth'
     $ui.LblTime.Text = T 'set.time'; $ui.LblAction.Text = T 'set.action'; $ui.RbActInstall.Content = T 'set.act.Install'; $ui.RbActNotify.Content = T 'set.act.Notify'
     $ui.LblAutoPrio.Text = T 'set.autoPrio'
@@ -272,6 +281,7 @@ function Set-Texts {
 
     $script:loading = $true
     $ui.CmbSchedule.Items.Clear(); foreach ($s in 'Manual', 'Daily', 'Weekly', 'BiWeekly', 'Monthly') { [void]$ui.CmbSchedule.Items.Add((New-ComboItem $s (T "set.sch.$s"))) }
+    $ui.CmbCheck.Items.Clear(); foreach ($s in 'Off', '1h', '3h', '6h', '12h', '24h') { [void]$ui.CmbCheck.Items.Add((New-ComboItem $s (T "set.check.$s"))) }
     $ui.CmbReboot.Items.Clear(); foreach ($s in 'Prompt', 'Auto', 'Scheduled', 'Never') { [void]$ui.CmbReboot.Items.Add((New-ComboItem $s (T "set.reboot.$s"))) }
     $culture = if ((Get-CurrentLanguage) -eq 'de') { [Globalization.CultureInfo]'de-DE' } else { [Globalization.CultureInfo]'en-US' }
     $ui.CmbDay.Items.Clear(); foreach ($d in 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday') {
@@ -302,6 +312,7 @@ function Show-Config {
     Select-ComboTag $ui.CmbDay $config.Schedule.DayOfWeek
     Select-ComboTag $ui.CmbDom $config.Schedule.DayOfMonth
     Select-ComboTag $ui.CmbReboot $config.Reboot
+    Select-ComboTag $ui.CmbCheck $config.CheckInterval
     Select-ComboTag $ui.CmbLang $config.Language
     $ui.TxtTime.Text = $config.Schedule.Time
     $ui.TxtRebootTime.Text = $config.RebootTime
@@ -455,9 +466,11 @@ function Save-Settings {
         $c.SelfUpdate.Repo = $ui.TxtRepo.Text.Trim()
         $c.SelfUpdate.Enabled = [bool]$ui.ChkSelf.IsChecked -and [bool]$c.SelfUpdate.Repo
         $c.StartWithWindows = [bool]$ui.ChkAutostart.IsChecked
+        $c.CheckInterval = [string]$ui.CmbCheck.SelectedItem.Tag
         if ($devMode) { $script:config = $c; Set-Dirty $false; Show-AppToast (T 'set.saved'); return $true }
         Save-Config -Config $c
         if ([bool]$c.StartWithWindows -ne [bool]$script:config.StartWithWindows) { Set-Autostart -Enabled ([bool]$c.StartWithWindows) }
+        if ([string]$c.CheckInterval -ne [string]$script:config.CheckInterval) { Set-BackgroundCheck -Interval ([string]$c.CheckInterval) }
         $scheduleChanged = ($c.Schedule | ConvertTo-Json -Compress) -ne ($script:config.Schedule | ConvertTo-Json -Compress)
         if ($scheduleChanged) { Register-ScheduleTask -Config $c }
         $langChanged = $c.Language -ne $script:config.Language
@@ -497,7 +510,7 @@ function Update-RowExclusion { param($Row)
     $Row.Excluded = Test-IdExcluded $Row.Id
     if ($Row.Excluded) { $Row.Selected = $false }
     $Row.ExcludeGlyph = if ($Row.Excluded) { [string][char]0xE7B3 } else { [string][char]0xED1A }
-    $Row.ExcludeTip = if ($Row.Excluded) { T 'up.include' } else { T 'up.exclude' }
+    $Row.ExcludeTip = if ($Row.Excluded) { T 'up.includeShort' } else { T 'up.excludeShort' }
     Set-RowGroup $Row
 }
 
@@ -675,6 +688,7 @@ function Show-ReportGrid { param($Report)
         [pscustomobject]@{
             Source = T ('source.' + $i.Source); Name = Resolve-Text $i.Name; From = $i.From; To = $i.To
             StatusText = T ('status.' + $i.Status); StatusColor = $statusColors[[string]$i.Status]; Note = $note
+            StatusRank = $order[[string]$i.Status]
         }
     }
     $ui.Grid.ItemsSource = @($list)
@@ -682,7 +696,7 @@ function Show-ReportGrid { param($Report)
 
 # ------------------------------------------------------------------ engine control
 function Show-Page { param([string]$Name)
-    foreach ($p in 'Overview', 'Updates', 'History', 'Settings') { $ui["Page$p"].Visibility = if ($p -eq $Name) { 'Visible' } else { 'Collapsed' } }
+    foreach ($p in 'Overview', 'Updates', 'Programs', 'Cleanup', 'Security', 'History', 'Settings') { $ui["Page$p"].Visibility = if ($p -eq $Name) { 'Visible' } else { 'Collapsed' } }
     if (-not $ui["Nav$Name"].IsChecked) { $ui["Nav$Name"].IsChecked = $true }
 }
 
@@ -750,6 +764,7 @@ function Complete-InstallRun {
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(700)
 $timer.Add_Tick({
+    Complete-BgTasks
     if ($showEvent.WaitOne(0)) { if ($window.WindowState -eq 'Minimized') { $window.WindowState = 'Normal' }; [void]$window.Activate() }
     $st = Get-Status
     if ($script:launchAt) {
@@ -786,6 +801,310 @@ $timer.Add_Tick({
     }
 })
 
+# ------------------------------------------------------------------ background tasks (keep the window responsive)
+$script:bgTasks = New-Object System.Collections.Generic.List[object]
+
+function Start-BgTask {
+    <# Runs $Script in a separate runspace of this (elevated) process. $Script receives one hashtable $p.
+       $OnDone gets ($Output, $ErrorText) on the UI thread. #>
+    param([Parameter(Mandatory)][scriptblock]$Script, [hashtable]$Params = @{}, [scriptblock]$OnDone, $Context)
+    $prelude = @"
+param(`$src, `$p)
+`$ErrorActionPreference = 'Stop'
+`$ProgressPreference = 'SilentlyContinue'
+`$env:PSModulePath = "`$env:ProgramFiles\WindowsPowerShell\Modules;`$PSHOME\Modules"
+foreach (`$m in 'Common', 'Providers', 'Uninstaller', 'Cleanup', 'SecurityScan') {
+    `$file = Join-Path `$src (`$m + '.psm1'); if (Test-Path `$file) { Import-Module `$file -DisableNameChecking }
+}
+"@
+    $ps = [powershell]::Create()
+    $prelude += "`nImport-I18n -Language '$(Get-CurrentLanguage)'`n"   # module texts in the UI language
+    [void]$ps.AddScript($prelude + "`n" + $Script.ToString()).AddArgument($src).AddArgument($Params)
+    $script:bgTasks.Add([pscustomobject]@{ Ps = $ps; Handle = $ps.BeginInvoke(); OnDone = $OnDone; Context = $Context })
+}
+
+function Complete-BgTasks {
+    foreach ($t in @($script:bgTasks.ToArray())) {
+        if (-not $t.Handle.IsCompleted) { continue }
+        [void]$script:bgTasks.Remove($t)
+        $out = $null; $err = ''
+        try { $out = $t.Ps.EndInvoke($t.Handle) } catch { $err = $_.Exception.InnerException.Message; if (-not $err) { $err = $_.Exception.Message } }
+        if (-not $err -and $t.Ps.Streams.Error.Count) { $err = [string]$t.Ps.Streams.Error[0] }
+        $t.Ps.Dispose()
+        # No GetNewClosure anywhere: closures lose access to this script's functions. Data travels as Context.
+        if ($t.OnDone) {
+            try { & $t.OnDone $out $err $t.Context }
+            catch {
+                Show-AppToast $_.Exception.Message 'error'
+                try { Add-Content -Path (Join-Path $paths.LogDir 'gui-error.log') -Value ("{0:yyyy-MM-dd HH:mm:ss} background task: {1}`n{2}" -f (Get-Date), $_.Exception.Message, $_.ScriptStackTrace) -Encoding UTF8 } catch { }
+            }
+        }
+    }
+}
+
+function Format-Size { param([double]$Bytes)
+    if ($Bytes -lt 0) { return '-' }
+    if ($Bytes -ge 1GB) { return '{0:N1} GB' -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return '{0:N0} MB' -f ($Bytes / 1MB) }
+    if ($Bytes -ge 1KB) { return '{0:N0} KB' -f ($Bytes / 1KB) }
+    return '{0:N0} B' -f $Bytes
+}
+
+function New-CheckList { param([object[]]$Items)
+    <# Checkbox list for dialogs: @{ Text; Checked; Enabled; Tag } -> StackPanel #>
+    $panel = New-Object System.Windows.Controls.StackPanel
+    $scroll = New-Object System.Windows.Controls.ScrollViewer; $scroll.MaxHeight = 260; $scroll.VerticalScrollBarVisibility = 'Auto'; $scroll.Content = $panel
+    foreach ($i in $Items) {
+        $cb = New-Object System.Windows.Controls.CheckBox
+        $cb.Style = $window.FindResource('Tick'); $cb.Margin = [System.Windows.Thickness]::new(0, 4, 0, 4)
+        $tb = New-Object System.Windows.Controls.TextBlock; $tb.Text = $i.Text; $tb.TextWrapping = 'Wrap'; $tb.TextTrimming = 'None'; $tb.MaxWidth = 360; $tb.FontSize = 12
+        $cb.Content = $tb; $cb.IsChecked = [bool]$i.Checked; $cb.IsEnabled = [bool]$i.Enabled; $cb.Tag = $i.Tag
+        [void]$panel.Children.Add($cb)
+    }
+    return $scroll
+}
+
+# ------------------------------------------------------------------ programs (clean uninstall)
+$progRows = New-Object 'System.Collections.ObjectModel.ObservableCollection[Alerion.ListRow]'
+$progView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($progRows)
+$ui.ProgramList.ItemsSource = $progRows
+$script:progSegment = 'All'; $script:progSearch = ''; $script:progLoaded = $false
+$sourceColors = @{ winget = '#3D7BFF'; msi = '#A78BFA'; exe = '#8A93A1'; store = '#34D399' }
+$progView.Filter = [Predicate[object]]{
+    param($r)
+    if ($script:progSearch -and $r.Title.IndexOf($script:progSearch, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+        ([string]$r.Subtitle).IndexOf($script:progSearch, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
+    if ($script:progSegment -eq 'Protected') { return $r.Locked }
+    return -not $r.Locked
+}
+
+function Set-ProgramSort {
+    $progView.SortDescriptions.Clear()
+    $tag = if ($ui.CmbProgSort.SelectedItem) { [string]$ui.CmbProgSort.SelectedItem.Tag } else { 'name' }
+    switch ($tag) {
+        'size' { $progView.SortDescriptions.Add((New-Object System.ComponentModel.SortDescription('SortValue', 'Descending'))) }
+        'date' { $progView.SortDescriptions.Add((New-Object System.ComponentModel.SortDescription('Key', 'Descending'))) }
+        default { $progView.SortDescriptions.Add((New-Object System.ComponentModel.SortDescription('Title', 'Ascending'))) }
+    }
+}
+
+function Update-ProgramEmpty {
+    $n = 0; foreach ($r in $progView) { $n++; break }
+    $ui.TxtProgEmpty.Visibility = if ($n) { 'Collapsed' } else { 'Visible' }
+}
+
+function Import-Programs {
+    $ui.TxtProgEmpty.Text = T 'pg.loading'; $ui.TxtProgEmpty.Visibility = 'Visible'; $ui.BtnProgRefresh.IsEnabled = $false
+    Start-BgTask -Script { @(Get-InstalledApps) } -OnDone {
+        param($out, $err)
+        $ui.BtnProgRefresh.IsEnabled = $true
+        if ($err) { $ui.TxtProgEmpty.Text = $err; return }
+        $progRows.Clear()
+        foreach ($a in @($out)) {
+            $r = New-Object Alerion.ListRow
+            $r.Data = $a; $r.Title = [string]$a.Name
+            $r.Subtitle = (@([string]$a.Publisher, [string]$a.Version) | Where-Object { $_ }) -join ('  ' + [char]0xB7 + '  ')
+            $r.SortValue = [double]$(if ($a.SizeMB) { $a.SizeMB } else { 0 })
+            $r.Right = if ($a.SizeMB) { Format-Size ([double]$a.SizeMB * 1MB) } else { '' }
+            $r.Key = [string]$a.InstallDate   # yyyyMMdd sorts as text
+            $r.Badge = T ('un.source.' + $a.Source); $r.BadgeBrush = $(if ($sourceColors.ContainsKey([string]$a.Source)) { $sourceColors[[string]$a.Source] } else { '#8A93A1' })
+            $r.Locked = [bool]$a.Protected
+            $r.Detail = if ($a.Protected) { T ('un.reason.' + $a.ProtectedReason) } else { '' }
+            $r.ActionText = if ($a.Protected) { T 'pg.protected' } else { T 'pg.uninstall' }
+            $progRows.Add($r)
+        }
+        $script:progLoaded = $true
+        $ui.TxtProgramsSub.Text = T 'pg.sub' @(@($progRows | Where-Object { -not $_.Locked }).Count, @($progRows | Where-Object { $_.Locked }).Count)
+        Set-ProgramSort; $progView.Refresh(); Update-ProgramEmpty
+    }
+}
+
+function Start-AppUninstall { param($Row)
+    $app = $Row.Data
+    $Row.Busy = $true; $Row.Detail = T 'pg.removing'
+    Start-BgTask -Params @{ App = $app; Dev = $devMode } -Script {
+        if (-not $p.Dev) { [void](New-RestorePoint) }
+        $r = Invoke-AppUninstall -App $p.App -DryRun:$p.Dev
+        $left = @()
+        if ($r.Status -eq 'Removed') { $left = @(Find-AppLeftovers -App $p.App) }
+        [pscustomobject]@{ Result = $r; Leftovers = $left }
+    } -Context $Row -OnDone {
+        param($out, $err, $Row)
+        $Row.Busy = $false
+        if ($err -or -not $out) { $Row.Detail = ''; Show-AppToast (T 'pg.failed' @($Row.Title, $err)) 'error'; return }
+        $res = @($out)[0]
+        switch ($res.Result.Status) {
+            'Removed' {
+                $left = @($res.Leftovers)
+                if ($left.Count) { Show-LeftoverDialog $Row.Title $left }
+                else { Show-AppToast (T 'pg.removed' @($Row.Title)) }
+                [void]$progRows.Remove($Row)
+            }
+            'WouldRemove' { $Row.Detail = ''; Show-AppToast (T 'pg.dryrun' @($Row.Title)) 'info' }
+            default {
+                $Row.Detail = Resolve-UninstallMessage $res.Result.Message
+                Show-Dialog -Title (T 'pg.failedTitle' @($Row.Title)) -Text $Row.Detail -Glyph ([string][char]0xE783) -Colors @('#FF6B6B', '#E0306E') -Buttons @(@{ Text = 'OK'; Kind = 'Secondary' })
+            }
+        }
+    }
+}
+
+function Resolve-UninstallMessage { param([string]$Message)
+    if (-not $Message) { return '' }
+    $key = 'un.msg.' + $Message
+    $t = T $key
+    if ($t -eq $key) { return $Message } else { return $t }
+}
+
+function Show-LeftoverDialog { param([string]$Name, [object[]]$Items)
+    $list = New-CheckList @($Items | ForEach-Object {
+        $size = if ($_.SizeMB) { ' (' + (Format-Size ([double]$_.SizeMB * 1MB)) + ')' } else { '' }
+        $why = if (-not $_.Safe) { '  -  ' + (T ('un.leftover.' + $_.Reason)) } else { '' }
+        @{ Text = ('{0}: {1}{2}{3}' -f (T ('un.type.' + $_.Type)), $_.Path, $size, $why); Checked = [bool]$_.Safe; Enabled = [bool]$_.Safe; Tag = $_ }
+    })
+    Show-Dialog -Title (T 'pg.leftTitle' @($Name)) -Text (T 'pg.leftText') -Glyph ([string][char]0xEA99) -Colors @('#A78BFA', '#6D28D9') -Extra @($list) -Buttons @(
+        @{ Text = T 'pg.leftRemove'; Kind = 'Primary'; Context = $list; Action = {
+            param($list)
+            $chosen = @($list.Content.Children | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag })
+            if (-not $chosen.Count) { return }
+            Start-BgTask -Params @{ Items = $chosen; Dev = $devMode } -Script { @(Remove-AppLeftovers -Items $p.Items -DryRun:$p.Dev) } -OnDone {
+                param($out, $err)
+                if ($err) { Show-AppToast $err 'error' } else { Show-AppToast (T 'pg.leftDone' @(@($out | Where-Object { $_.Status -in 'Removed', 'WouldRemove' }).Count)) }
+            }
+        } },
+        @{ Text = T 'pg.leftKeep'; Kind = 'Ghost' })
+}
+
+# ------------------------------------------------------------------ cleanup
+$cleanRows = New-Object 'System.Collections.ObjectModel.ObservableCollection[Alerion.ListRow]'
+$ui.CleanupList.ItemsSource = $cleanRows
+$script:cleanLoaded = $false
+
+function Update-CleanupTotal {
+    $sum = 0; foreach ($r in $cleanRows) { if ($r.Selected -and -not $r.Locked -and $r.SortValue -gt 0) { $sum += $r.SortValue } }
+    $n = @($cleanRows | Where-Object { $_.Selected -and -not $_.Locked }).Count
+    $ui.TxtCleanupTotal.Text = T 'cl.total' @($n, (Format-Size $sum))
+    $ui.BtnCleanupRun.Content = T 'cl.run' @(Format-Size $sum)
+    $ui.BtnCleanupRun.IsEnabled = $n -gt 0
+}
+
+function Import-Cleanup {
+    $ui.BtnCleanupScan.IsEnabled = $false; $ui.BtnCleanupRun.IsEnabled = $false; $ui.TxtCleanupTotal.Text = T 'cl.scanning'
+    Start-BgTask -Script { @(Get-CleanupCategories) } -OnDone {
+        param($out, $err)
+        $ui.BtnCleanupScan.IsEnabled = $true
+        if ($err) { $ui.TxtCleanupTotal.Text = $err; return }
+        $previous = @{}; foreach ($r in $cleanRows) { $previous[$r.Key] = $r.Selected }
+        $cleanRows.Clear()
+        foreach ($cat in @($out)) {
+            $r = New-Object Alerion.ListRow
+            $r.Data = $cat; $r.Key = [string]$cat.Id
+            $r.Title = T ('cl.' + $cat.Id); $r.Subtitle = T ('cl.' + $cat.Id + '.desc')
+            $r.SortValue = [double]$cat.SizeBytes; $r.Right = Format-Size ([double]$cat.SizeBytes)
+            $r.Badge = T ('cl.risk.' + $cat.Risk); $r.BadgeBrush = $(if ($cat.Risk -eq 'None') { '#30D158' } else { '#FF9F0A' })
+            $r.Locked = -not [bool]$cat.Available
+            $r.State = if (-not $cat.Available -and $cat.Note) { T ('cl.note.' + $cat.Note) } else { '' }; $r.StateBrush = '#8A93A1'
+            $r.Selected = if ($previous.ContainsKey($r.Key)) { $previous[$r.Key] } else { [bool]$cat.Default -and [bool]$cat.Available }
+            if ($r.Locked) { $r.Selected = $false }
+            $cleanRows.Add($r)
+        }
+        $script:cleanLoaded = $true
+        Update-CleanupTotal
+    }
+}
+
+function Start-Cleanup {
+    $ids = @($cleanRows | Where-Object { $_.Selected -and -not $_.Locked } | ForEach-Object { $_.Key })
+    if (-not $ids.Count) { return }
+    $go = {
+        param($ids)
+        foreach ($r in $cleanRows) { if ($ids -contains $r.Key) { $r.State = T 'cl.working'; $r.StateBrush = '#6FA8FF' } }
+        $ui.BtnCleanupRun.IsEnabled = $false; $ui.BtnCleanupScan.IsEnabled = $false
+        Start-BgTask -Params @{ Ids = $ids; Dev = $devMode } -Script { @(Invoke-Cleanup -Ids $p.Ids -DryRun:$p.Dev) } -OnDone {
+            param($out, $err)
+            if ($err) { Show-AppToast $err 'error'; Import-Cleanup; return }
+            $freed = 0
+            foreach ($res in @($out)) {
+                $freed += [double]$res.FreedBytes
+                $row = @($cleanRows | Where-Object { $_.Key -eq $res.Id }) | Select-Object -First 1
+                if ($row) { $row.State = (T ('cl.status.' + $res.Status)) + $(if ($res.FreedBytes -gt 0) { ' ' + [char]0xB7 + ' ' + (Format-Size ([double]$res.FreedBytes)) } else { '' }); $row.StateBrush = $(if ($res.Status -eq 'Failed') { '#FF6B61' } else { '#30D158' }) }
+            }
+            Show-AppToast (T 'cl.done' @(Format-Size $freed))
+            Import-Cleanup
+        }
+    }
+    if ($ids -contains 'recyclebin') {
+        Show-Dialog -Title (T 'cl.confirmTitle') -Text (T 'cl.confirmBin') -Glyph ([string][char]0xE74D) -Colors @('#A78BFA', '#6D28D9') -Buttons @(
+            @{ Text = T 'cl.confirmGo'; Kind = 'Primary'; Action = $go; Context = $ids }, @{ Text = T 'dlg.later'; Kind = 'Ghost' })
+    } else { & $go $ids }
+}
+
+# ------------------------------------------------------------------ security
+$secRows = New-Object 'System.Collections.ObjectModel.ObservableCollection[Alerion.ListRow]'
+$scanRows = New-Object 'System.Collections.ObjectModel.ObservableCollection[Alerion.ListRow]'
+$ui.SecStatusList.ItemsSource = $secRows; $ui.ScanList.ItemsSource = $scanRows
+$script:secLoaded = $false; $script:scanRunning = $false
+$secStateColors = @{ Ok = '#30D158'; Warning = '#FF9F0A'; Critical = '#FF453A'; Unknown = '#6B7380' }
+foreach ($s in @(@('Quick', [string][char]0xE721), @('Full', [string][char]0xEA18), @('Mrt', [string][char]0xE7BA), @('MrtFull', [string][char]0xE9F9), @('Integrity', [string][char]0xE90F))) {
+    $r = New-Object Alerion.ListRow; $r.Key = $s[0]; $r.Glyph = $s[1]; $r.GlyphBrush = '#6FA8FF'; $scanRows.Add($r)
+}
+
+function Set-ScanTexts {
+    foreach ($r in $scanRows) { $r.Title = T ('sec.scan.' + $r.Key); $r.Subtitle = T ('sec.scan.' + $r.Key + '.desc'); $r.ActionText = T 'sec.scan.start' }
+    $ui.ScanList.Items.Refresh()
+}
+
+function Import-Security {
+    $ui.BtnSecRefresh.IsEnabled = $false; $ui.TxtSecuritySub.Text = T 'pg.loading'
+    Start-BgTask -Script { [pscustomobject]@{ Status = @(Get-SecurityStatus); Threats = @(Get-ThreatHistory) } } -OnDone {
+        param($out, $err)
+        $ui.BtnSecRefresh.IsEnabled = $true
+        if ($err -or -not $out) { $ui.TxtSecuritySub.Text = $err; return }
+        $res = @($out)[0]
+        $secRows.Clear()
+        $order = @{ Critical = 0; Warning = 1; Unknown = 2; Ok = 3 }
+        foreach ($chk in (@($res.Status) | Sort-Object { $order[[string]$_.State] })) {
+            $r = New-Object Alerion.ListRow
+            $r.Key = [string]$chk.Id; $r.Title = T ('sec.' + $chk.Id); $r.Subtitle = T ('sec.' + $chk.Id + '.desc'); $r.Detail = [string]$chk.Detail
+            $r.State = [string]$chk.State; $r.StateBrush = $secStateColors[[string]$chk.State]; $r.Uri = [string]$chk.FixUri; $r.ActionText = T 'sec.fix'
+            $secRows.Add($r)
+        }
+        $bad = @($res.Status | Where-Object { $_.State -in 'Warning', 'Critical' }).Count
+        $ui.TxtSecuritySub.Text = if ($bad) { T 'pg.secIssues' @($bad) } else { T 'pg.secOk' }
+        $threats = @($res.Threats)
+        $ui.TxtSecThreats.Text = if ($threats.Count) { ($threats | ForEach-Object { '{0:g}  {1}  ({2})' -f [datetime]$_.Time, $_.Name, $_.Action }) -join "`n" } else { T 'sec.history.none' }
+        $script:secLoaded = $true
+    }
+}
+
+function Start-Scan { param($Row)
+    if ($script:scanRunning) { return }
+    $run = {
+        param($Row)
+        $script:scanRunning = $true
+        foreach ($r in $scanRows) { $r.Busy = $true }
+        $Row.State = T 'sec.scan.running'; $Row.StateBrush = '#6FA8FF'
+        Show-AppToast (T 'sec.scan.keepOpen') 'info'
+        Start-BgTask -Params @{ Type = $Row.Key; Dev = $devMode } -Context $Row -Script { Start-SecurityScan -Type $p.Type -DryRun:$p.Dev } -OnDone {
+            param($out, $err, $Row)
+            $script:scanRunning = $false
+            foreach ($r in $scanRows) { $r.Busy = $false }
+            if ($err -or -not $out) { $Row.State = $err; $Row.StateBrush = '#FF6B61'; return }
+            $res = @($out)[0]
+            $Row.State = (T ('sec.result.' + $res.Status)) + $(if ($res.DurationSec) { ' ' + [char]0xB7 + ' ' + (T 'sec.result.duration' @(('{0} min' -f [int][Math]::Ceiling($res.DurationSec / 60)))) } else { '' })
+            $Row.StateBrush = switch ($res.Status) { 'Clean' { '#30D158' } 'ThreatsRemoved' { '#FF9F0A' } 'ThreatsFound' { '#FF453A' } 'Failed' { '#FF453A' } default { '#8A93A1' } }
+            $msg = if ($res.Message) { $k = 'sec.msg.' + $res.Message; $t = T $k; if ($t -ne $k) { $t } else { [string]$res.Message } } else { '' }
+            if (@($res.Threats).Count -or $res.Status -in 'ThreatsFound', 'Failed') {
+                Show-Dialog -Title (T ('sec.result.' + $res.Status)) -Text ((@($res.Threats) -join "`n") + $(if ($msg) { "`n" + $msg } else { '' })) -Glyph ([string][char]0xEA18) -Colors @('#F87171', '#DC2626') -Buttons @(@{ Text = 'OK'; Kind = 'Secondary' })
+            } else { Show-AppToast $Row.State }
+            Import-Security
+        }
+    }
+    if ($Row.Key -in 'Full', 'MrtFull', 'Integrity') {
+        Show-Dialog -Title $Row.Title -Text $Row.Subtitle -Glyph $Row.Glyph -Colors @('#F87171', '#DC2626') -Buttons @(
+            @{ Text = T 'sec.scan.start'; Kind = 'Primary'; Action = $run; Context = $Row }, @{ Text = T 'dlg.later'; Kind = 'Ghost' })
+    } else { & $run $Row }
+}
 # ------------------------------------------------------------------ events
 $ui.BtnClose.Add_Click({ $window.Close() })
 $ui.BtnMin.Add_Click({ $window.WindowState = 'Minimized' })
@@ -793,7 +1112,7 @@ $ui.BtnMax.Add_Click({ $window.WindowState = if ($window.WindowState -eq 'Maximi
 $window.Add_StateChanged({
     # Maximized: no shadow margin, square corners (the window touches the screen edges).
     $max = $window.WindowState -eq 'Maximized'
-    $ui.Root.Margin = [System.Windows.Thickness]::new($(if ($max) { 7 } else { 12 }))
+    $ui.Root.Margin = [System.Windows.Thickness]::new($(if ($max) { 0 } else { 12 }))
     $r = [System.Windows.CornerRadius]::new($(if ($max) { 0 } else { 18 }))
     $ui.WindowShadow.CornerRadius = $r; $ui.WindowFrame.CornerRadius = $r; $ui.DialogDim.CornerRadius = $r
 })
@@ -801,6 +1120,29 @@ function Leave-Settings { if ($ui.PageSettings.Visibility -eq 'Visible' -and $sc
 $ui.NavOverview.Add_Checked({ Leave-Settings; Show-Page 'Overview' })
 $ui.NavUpdates.Add_Checked({ Leave-Settings; Show-Page 'Updates' })
 $ui.NavHistory.Add_Checked({ Leave-Settings; Show-Page 'History'; Show-History })
+$ui.NavPrograms.Add_Checked({ Leave-Settings; Show-Page 'Programs'; if (-not $script:progLoaded) { Import-Programs } })
+$ui.NavCleanup.Add_Checked({ Leave-Settings; Show-Page 'Cleanup'; if (-not $script:cleanLoaded) { Import-Cleanup } })
+$ui.NavSecurity.Add_Checked({ Leave-Settings; Show-Page 'Security'; if (-not $script:secLoaded) { Import-Security } })
+$ui.BtnProgRefresh.Add_Click({ Import-Programs })
+$ui.CmbProgSort.Add_SelectionChanged({ Set-ProgramSort })
+foreach ($seg in 'All', 'Protected') { $ui["SegProg$seg"].Tag = $seg; $ui["SegProg$seg"].Add_Checked({ param($s) $script:progSegment = [string]$s.Tag; $progView.Refresh(); Update-ProgramEmpty }) }
+$ui.TxtProgSearch.Add_TextChanged({ $script:progSearch = $ui.TxtProgSearch.Text.Trim(); $ui.TxtProgSearchHint.Visibility = if ($ui.TxtProgSearch.Text) { 'Collapsed' } else { 'Visible' }; $progView.Refresh(); Update-ProgramEmpty })
+$ui.ProgramList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler]{
+    param($s, $e) $b = $e.OriginalSource
+    if ($b.Name -ne 'ProgAction') { return }
+    $row = $b.DataContext
+    if ($row.Locked -or $row.Busy) { return }
+    Show-Dialog -Title (T 'pg.confirmTitle' @($row.Title)) -Text (T 'pg.confirmText') -Glyph ([string][char]0xE74D) -Colors @('#FF6B6B', '#E0306E') -Buttons @(
+        @{ Text = T 'pg.uninstall'; Kind = 'Danger'; Context = $row; Action = { param($r) Start-AppUninstall $r } }, @{ Text = T 'dlg.later'; Kind = 'Ghost' })
+})
+$ui.BtnCleanupScan.Add_Click({ Import-Cleanup })
+$ui.BtnCleanupRun.Add_Click({ Start-Cleanup })
+$ui.CleanupList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler]{ Update-CleanupTotal })
+$ui.BtnSecRefresh.Add_Click({ Import-Security })
+$ui.ScanList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler]{
+    param($s, $e) if ($e.OriginalSource.Name -eq 'ScanAction') { Start-Scan $e.OriginalSource.DataContext } })
+$ui.SecStatusList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler]{
+    param($s, $e) if ($e.OriginalSource.Name -eq 'SecFix' -and $e.OriginalSource.DataContext.Uri) { Start-Process $e.OriginalSource.DataContext.Uri } })
 $ui.NavSettings.Add_Checked({ Show-Page 'Settings' })
 
 $ui.BtnScan.Add_Click({ Start-Engine -Mode scan })
@@ -851,7 +1193,7 @@ $ui.BtnLogs.Add_Click({ Start-Process explorer.exe -ArgumentList "`"$($paths.Log
 $ui.BtnHtml.Add_Click({ $r = $script:shownReport; if ($r -and (Test-Path $r.HtmlPath)) { Start-Process $r.HtmlPath } })
 
 # settings: changes are collected and saved with the Save button / when leaving the page / on close
-foreach ($c in 'CmbSchedule', 'CmbDay', 'CmbDom', 'CmbReboot', 'CmbLang') { $ui[$c].Add_SelectionChanged({ Register-Change }) }
+foreach ($c in 'CmbSchedule', 'CmbDay', 'CmbDom', 'CmbReboot', 'CmbLang', 'CmbCheck') { $ui[$c].Add_SelectionChanged({ Register-Change }) }
 foreach ($c in 'ChkWake', 'ChkParallel', 'ChkRestore', 'ChkSelf', 'ChkAutostart', 'ChkPrioCritical', 'ChkPrioImportant', 'ChkPrioNormal', 'ChkPrioOptional') { $ui[$c].Add_Click({ Register-Change }) }
 foreach ($c in 'RbActInstall', 'RbActNotify', 'RbVisible', 'RbSilent') { $ui[$c].Add_Checked({ Register-Change }) }
 foreach ($c in 'TxtTime', 'TxtRepo', 'TxtRebootTime') { $ui[$c].Add_TextChanged({ Register-Change }) }
@@ -933,17 +1275,22 @@ function Invoke-Snapshot {
     if ($Page -eq 'Settings') { $window.Height = 1900 }
     $window.Add_ContentRendered({
         Show-Page $Page; if ($Page -eq 'History') { Show-History }
-        if ($Query) { $ui.TxtSearch.Text = $Query }
+        switch ($Page) { 'Programs' { Import-Programs } 'Cleanup' { Import-Cleanup } 'Security' { Import-Security } }
+        if ($Query) { $ui.TxtSearch.Text = $Query; $ui.TxtProgSearch.Text = $Query }
         Invoke-DevDialog
         $t = New-Object System.Windows.Threading.DispatcherTimer; $t.Interval = [TimeSpan]::FromMilliseconds(900)
         $t.Add_Tick({
-            $t.Stop()
+            param($timerSender)
+            Complete-BgTasks
+            if ($script:bgTasks.Count) { $script:snapWait = 2; return }   # wait for page data
+            if ($script:snapWait -gt 0) { $script:snapWait--; return }   # then let WPF lay out the lists
+            $timerSender.Stop()
             $bmp = New-Object System.Windows.Media.Imaging.RenderTargetBitmap([int]$window.ActualWidth, [int]$window.ActualHeight, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
             $bmp.Render($window)
             $enc = New-Object System.Windows.Media.Imaging.PngBitmapEncoder; $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($bmp))
             $fs = [IO.File]::Create($Snapshot); $enc.Save($fs); $fs.Close()
             $window.Close()
-        }.GetNewClosure())
+        })
         $t.Start()
     })
     [void]$window.ShowDialog()

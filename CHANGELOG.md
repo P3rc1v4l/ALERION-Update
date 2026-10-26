@@ -2,6 +2,43 @@
 
 Alle relevanten Änderungen an Update Center (bis v1.2.0 „ALERION Update“). Format nach *Keep a Changelog*, Versionierung nach SemVer.
 
+## [1.4.0] - 2026-10-26
+### Added
+- **Programme** (sauber deinstallieren): alle installierten Programme inkl. Store-Apps mit Suche und Sortierung.
+  Systemkomponenten, Treiber, Laufzeiten (VC++, .NET, WebView2, DirectX), Updates und Windows-Bausteine sind
+  **geschützt** und nicht deinstallierbar. Ablauf: Wiederherstellungspunkt → Deinstallation (winget → MSI → Hersteller-
+  Deinstaller → Store) → Prüfung, ob wirklich entfernt → Reste-Suche (nur eindeutig zugehörige Ordner/Schlüssel/
+  Verknüpfungen) → du wählst aus; Ordner gehen in den Papierkorb, Registry-Schlüssel werden vorher gesichert.
+- **Aufräumen**: nur risikofreie Bereiche mit Größenanzeige – Papierkorb, temporäre Dateien (> 24 h),
+  Windows-Update-Cache, Übermittlungsoptimierung, Miniaturansichten, Fehlerberichte, DirectX-Shader-Cache,
+  Browser-Cache (nie Cookies/Verlauf/Passwörter; übersprungen, solange der Browser läuft), alte Absturzabbilder,
+  eigene alte Logs; optional Komponentenspeicher (DISM ohne /ResetBase). Bewusst **nicht**: Prefetch, Registry-
+  „Reinigung“, WinSxS/Installer-Ordner.
+- **Sicherheit**: Defender-Schnellscan und vollständiger Scan, Microsoft-Tool zum Entfernen bösartiger Software (MRT,
+  schnell/vollständig), Systemdateien prüfen und reparieren (sfc, bei Bedarf DISM) – plus Schutzstatus (Virenschutz,
+  Echtzeitschutz, Signaturen, Manipulationsschutz, Firewall, UAC, Secure Boot, TPM, BitLocker, SmartScreen,
+  Speicherintegrität, SMBv1, Remotedesktop, PUA-Schutz, letzter Scan, Windows Update) mit „Öffnen“-Link zur
+  passenden Windows-Seite und erkannte Bedrohungen der letzten 30 Tage.
+- **Hintergrund-Suche** mit einstellbarem Intervall (aus, stündlich, 3/6/12 h, täglich): benachrichtigt nur über
+  *neue* Updates.
+- Lange Vorgänge (Scans, Deinstallation, Aufräumen) laufen im Hintergrund – die App bleibt bedienbar.
+
+### Changed
+- **Verlauf**: Texte werden umgebrochen statt abgeschnitten (voller Text auch als Tooltip), Spalten sind
+  verbreiterbar und **per Klick sortierbar**.
+- **Ausschließen** als beschriftete Schaltfläche („Ausschließen“/„Einschließen“), dezent bis man die Zeile überfährt.
+- **Maximieren** nutzt nur den Arbeitsbereich – die Taskleiste bleibt sichtbar (auf jedem Monitor).
+- **Einstellungen** nutzen die volle Fensterbreite.
+- GitHub-Repository heißt jetzt **P3rc1v4l/UpdateCenter** (alte Adresse leitet weiter; Einstellung wird automatisch umgestellt).
+- Actions-Läufe älter als 2 Tage werden täglich automatisch gelöscht.
+
+### Fixed – fehlgeschlagene Updates
+- **Programm geöffnet** (z. B. OBS): wird vorher erkannt (Prozess im Installationsordner) und übersprungen statt zu scheitern.
+- **„Kein passendes Update“** (z. B. FACEIT): automatischer zweiter Versuch mit `--scope user` bzw. `--scope machine`.
+- **Gleiche Version nach „erfolgreicher“ Installation** (z. B. Google Play Games, abweichende Versionsanzeige),
+  **andere Installationsart** (z. B. Epic Online Services) und **Parallel-Installationen** (z. B. Unity-Editor):
+  werden gemerkt und für genau diese Version nicht mehr empfohlen, sondern mit Erklärung als „Optional“ angezeigt.
+
 ## [1.3.0] - 2026-10-25
 ### Fixed
 - **Ausgewählte Updates wurden nicht installiert:** Windows PowerShell 5.1 las die Auswahlliste als *ein* Element

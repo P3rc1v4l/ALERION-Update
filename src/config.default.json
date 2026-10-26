@@ -15,6 +15,7 @@
     "WakeToRun": false
   },
   "ScheduleAction": "Install",
+  "CheckInterval": "6h",
   "AutoInstallPriorities": ["Critical", "Important", "Normal"],
   "Sources": {
     "Winget": true,
@@ -35,6 +36,6 @@
   "LogRetentionDays": 60,
   "SelfUpdate": {
     "Enabled": true,
-    "Repo": "P3rc1v4l/ALERION-Update"
+    "Repo": "P3rc1v4l/UpdateCenter"
   }
 }

@@ -13,6 +13,7 @@ $script:TaskPath      = (Get-Product).TaskPath
 $script:TaskSchedule  = 'Update Center'
 $script:TaskGui       = 'Update Center GUI'
 $script:TaskAutostart = 'Update Center Autostart'
+$script:TaskCheck     = 'Update Center Check'
 
 function Get-TaskNames { [pscustomobject]@{ Path = $script:TaskPath; Schedule = $script:TaskSchedule; Gui = $script:TaskGui } }
 
@@ -192,6 +193,21 @@ function Set-Autostart {
     else { Unregister-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskAutostart -Confirm:$false -ErrorAction SilentlyContinue }
 }
 
+function Set-BackgroundCheck {
+    <# Periodic quiet scan that only notifies about new updates ('Off' removes the task). #>
+    param([Parameter(Mandatory)][string]$Interval, [string]$AppRoot = (Get-AppPaths).AppRoot)
+    if ($Interval -eq 'Off') {
+        Unregister-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskCheck -Confirm:$false -ErrorAction SilentlyContinue
+        return
+    }
+    $hours = [int]($Interval.TrimEnd('h'))
+    $start = (Get-Date).AddMinutes(15).ToString('yyyy-MM-ddTHH:mm:ss')
+    $trigger = "<TimeTrigger><Repetition><Interval>PT$($hours)H</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>$start</StartBoundary><Enabled>true</Enabled></TimeTrigger>"
+    $args2 = "--headless `"$(Get-PowerShellExe)`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $AppRoot 'src\UpdateEngine.ps1')`" -BackgroundCheck"
+    $xml = New-TaskXml -Description 'Looks for new updates in the background and notifies (Update Center).' -Arguments $args2 -TriggerXml $trigger -TimeLimit 'PT1H'
+    Register-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskCheck -Xml $xml -Force | Out-Null
+}
+
 function Remove-LegacyTasks {
     <# v1.x ("ALERION Update") task folder. #>
     $legacy = (Get-Product).LegacyTaskPath
@@ -212,7 +228,7 @@ function Test-GuiTask {
 }
 
 function Unregister-AllTasks {
-    foreach ($n in @($script:TaskSchedule, $script:TaskGui, $script:TaskRestart, $script:TaskAutostart)) {
+    foreach ($n in @($script:TaskSchedule, $script:TaskGui, $script:TaskRestart, $script:TaskAutostart, $script:TaskCheck)) {
         Unregister-ScheduledTask -TaskPath $script:TaskPath -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue
     }
 }

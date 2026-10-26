@@ -125,11 +125,11 @@ Check 'config migration schema 1 -> 2' {
     $old = '{"SchemaVersion":1,"Mode":"Silent","SelfUpdate":{"Enabled":true,"Repo":"P3rc1v4l/ALERION-Update"}}'
     [IO.File]::WriteAllText((Get-AppPaths).ConfigPath, $old)
     $c = Get-Config
-    ($c.SchemaVersion -eq 2) -and ($c.Mode -eq 'Silent') -and ($c.ScheduleAction -eq 'Install') -and (@($c.AutoInstallPriorities).Count -eq 3) -and ($c.SelfUpdate.Repo -eq 'P3rc1v4l/ALERION-Update')
+    ($c.SchemaVersion -eq 2) -and ($c.Mode -eq 'Silent') -and ($c.ScheduleAction -eq 'Install') -and (@($c.AutoInstallPriorities).Count -eq 3) -and ($c.SelfUpdate.Repo -eq 'P3rc1v4l/UpdateCenter')   # old repo name is migrated
 }
 Check 'result keys' { ((New-UpdateResult -Source winget -Name 'X' -Id 'A.B').Key -eq 'winget|A.B') }
 Check 'GUI view model compiles' {
-    if (-not ('Alerion.UpdateRow' -as [type])) { Add-Type -TypeDefinition (Get-Content (Join-Path $src 'GuiModel.cs') -Raw) }
+    if (-not ('Alerion.UpdateRow' -as [type])) { Add-Type -TypeDefinition (Get-Content (Join-Path $src 'GuiModel.cs') -Raw) -ReferencedAssemblies PresentationCore, WindowsBase, System.Xaml }
     $r = New-Object Alerion.UpdateRow; $r.IsUpdate = $true; $r.Excluded = $false; $r.Selectable
 }
 Check 'winget parser handles empty output' { @(ConvertFrom-WingetUpgradeTable -Text 'No installed package found').Count -eq 0 }

@@ -25,7 +25,9 @@ param(
     [switch]$Silent,
     [switch]$FromGui,
     # Only update Update Center itself (Settings > Check for updates).
-    [switch]$SelfUpdateOnly
+    [switch]$SelfUpdateOnly,
+    # Periodic background check: scan only, notify about NEW updates (no window, no install).
+    [switch]$BackgroundCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,6 +41,7 @@ $src = $PSScriptRoot
 Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Providers.psm1') -DisableNameChecking -Force
 
+if ($BackgroundCheck) { $Scan = [switch]$true; $Silent = [switch]$true }
 $scanOnly = [bool]($Scan -or $DryRun)
 if (-not (Test-IsAdmin) -and -not $scanOnly) {
     Write-Error 'Update Center must run elevated (use the desktop shortcut or the scheduled task).'
@@ -193,11 +196,17 @@ try {
         if (-not (Get-WingetPath)) {
             Add-Result (New-UpdateResult -Source 'winget' -Name 'winget' -Status Failed -Message 'msg.wingetMissing')
         } else {
+            $memory = Get-WingetMemory
             foreach ($p in @(Get-WingetUpgrades -IncludeUnknown ([bool]$s.WingetIncludeUnknown))) {
                 $c = New-UpdateResult -Source 'winget' -Name $p.Name -Id $p.Id -From $p.Version -To $p.Available -Status Available
                 $c | Add-Member -NotePropertyName WingetSource -NotePropertyValue $p.Source
                 if ($p.Truncated) { $c.Status = 'Skipped'; $c.Message = 'msg.truncatedId' }
-                Add-Candidate (Set-UpdateMeta -Item $c)
+                $c = Set-UpdateMeta -Item $c
+                # Failed the same way for this exact version before: keep it visible but not recommended.
+                if ($memory.ContainsKey($p.Id) -and [string]$memory[$p.Id].Available -eq [string]$p.Available) {
+                    $c.Priority = 'Optional'; $c.Message = 'msg.mem.' + $memory[$p.Id].Kind
+                }
+                Add-Candidate $c
             }
             if ($Scan) { Step 'scan' 6 'Reading installed programs'; $installed = @(Get-InstalledPrograms) }
         }
@@ -261,6 +270,16 @@ try {
 
     if ($scanOnly) {
         if ($DryRun) { Add-Result $candidates.ToArray() }
+        if ($BackgroundCheck) {
+            # Only tell the user about updates they have not been told about yet.
+            $notifiedFile = Join-Path (Get-AppPaths).StateDir 'notified.json'
+            $known = @(); if (Test-Path $notifiedFile) { try { $known = @((Get-Content $notifiedFile -Raw | ConvertFrom-Json) | ForEach-Object { [string]$_ }) } catch { } }
+            $current = @($available | Where-Object { -not $_.IsCheck -and $_.Priority -ne 'Optional' } | ForEach-Object { $_.Key + '=' + $_.To })
+            $new = @($current | Where-Object { $known -notcontains $_ })
+            if ($new.Count) { Show-Toast -Title (T 'toast.available' @($current.Count)) -Body (T 'toast.availableBody') }
+            Write-AtomicFile -Path $notifiedFile -Content (ConvertTo-Json @($current) -Compress)
+            Write-Log -Message ("Background check: {0} update(s), {1} new" -f $current.Count, $new.Count)
+        }
         if ($Scheduled -and $config.ScheduleAction -eq 'Notify') {
             $n = @($available | Where-Object { -not $_.IsCheck }).Count
             if ($n -gt 0) { Show-Toast -Title (T 'toast.available' @($n)) -Body (T 'toast.availableBody') }
@@ -382,6 +401,7 @@ try {
                 }
             } catch { Write-Log -Level WARN -Message "Verification scan failed: $($_.Exception.Message)" }
         }
+        try { Update-WingetMemory -Results $results.ToArray() } catch { Write-Log -Level WARN -Message "winget memory: $($_.Exception.Message)" }
         if ($storeBefore) {
             Start-Sleep -Seconds 20
             foreach ($r in @(Compare-StoreSnapshot -Before $storeBefore)) { $r.Priority = 'Important'; Add-Result $r }

@@ -2,7 +2,7 @@
 .SYNOPSIS
     Online installer for Update Center. Run in PowerShell:
 
-        irm https://raw.githubusercontent.com/P3rc1v4l/ALERION-Update/main/get.ps1 | iex
+        irm https://raw.githubusercontent.com/P3rc1v4l/UpdateCenter/main/get.ps1 | iex
 
     Downloads the latest release from GitHub, verifies its SHA-256 checksum, unpacks it to a
     temporary folder and starts the installer (one administrator prompt).
@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }
 
-$repo = 'P3rc1v4l/ALERION-Update'
+$repo = 'P3rc1v4l/UpdateCenter'
 $headers = @{ 'User-Agent' = 'UpdateCenter-Setup'; 'Accept' = 'application/vnd.github+json' }
 Write-Host 'Update Center - downloading the latest version ...' -ForegroundColor Cyan
 $rel = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $headers

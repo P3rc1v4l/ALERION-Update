@@ -1,0 +1,29 @@
+name: Clean up old workflow runs
+
+# Keeps the Actions tab tidy: deletes every workflow run (incl. its logs and artifacts)
+# that is older than two days. Runs daily and can be started by hand.
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete runs older than 2 days
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          cutoff=$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          echo "Deleting runs created before $cutoff"
+          gh api --paginate "repos/$REPO/actions/runs?per_page=100" \
+            --jq ".workflow_runs[] | select(.created_at < \"$cutoff\") | select(.status == \"completed\") | .id" |
+          while read -r id; do
+            gh api -X DELETE "repos/$REPO/actions/runs/$id" && echo "deleted $id"
+          done

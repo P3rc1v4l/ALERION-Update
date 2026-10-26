@@ -223,9 +223,36 @@ function Get-WingetUpgrades {
     return @(ConvertFrom-WingetUpgradeTable -Text $r.Output)
 }
 
+function Get-PackageProcess {
+    <# Running processes that belong to an installed program. winget manifests carry no process
+       names, so the install folder is taken from the uninstall registry entry with the same
+       display name and matched against the paths of running processes. #>
+    param([Parameter(Mandatory)][string]$DisplayName)
+    $roots = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+             'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    $folders = foreach ($entry in @(Get-ItemProperty $roots -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and $_.DisplayName -eq $DisplayName })) {
+        if ($entry.PSObject.Properties.Name -contains 'InstallLocation' -and $entry.InstallLocation) { $entry.InstallLocation.Trim('"').TrimEnd('\') }
+        elseif ($entry.PSObject.Properties.Name -contains 'DisplayIcon' -and $entry.DisplayIcon) { Split-Path ($entry.DisplayIcon.Split(',')[0].Trim('"')) -Parent }
+    }
+    # Never treat broad folders as "the program" (would match unrelated processes).
+    $folders = @($folders | Where-Object { $_ -and $_.Length -gt 12 -and $_ -notmatch '^[A-Za-z]:\\(Windows|Program Files( \(x86\))?|ProgramData)?\\?$' } | Select-Object -Unique)
+    if (-not $folders.Count) { return @() }
+    return @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $p = $null; try { $p = $_.Path } catch { }
+        $p -and @($folders | Where-Object { $p.StartsWith($_ + '\', [StringComparison]::OrdinalIgnoreCase) }).Count
+    })
+}
+
 function Invoke-WingetPackageUpgrade {
     param([Parameter(Mandatory)]$Package, [int]$TimeoutMinutes = 90)
     $winget = Get-WingetPath
+    $base = @{ Source = 'winget'; Name = $Package.Name; Id = $Package.Id; From = $Package.Version; To = $Package.Available }
+    # A running program usually blocks its own update (e.g. OBS) - skip instead of failing.
+    $running = @(Get-PackageProcess -DisplayName $Package.Name)
+    if ($running.Count) {
+        Write-Log -Level WARN -Message ("winget {0}: skipped, running ({1})" -f $Package.Id, (($running | ForEach-Object { $_.ProcessName } | Select-Object -Unique) -join ', '))
+        return New-UpdateResult @base -Status Skipped -Message 'msg.appRunning'
+    }
     $wgArgs = @('upgrade', '--id', $Package.Id, '--exact', '--source', $Package.Source, '--silent',
         '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
     if ($Package.Version -match 'Unknown|Unbekannt|<|>') { $wgArgs += '--include-unknown' }
@@ -234,20 +261,61 @@ function Invoke-WingetPackageUpgrade {
     $code = $r.ExitCode
     $kind = if ($script:WingetCodes.ContainsKey($code)) { $script:WingetCodes[$code] } else { 'ERROR' }
     if ($r.TimedOut) { $kind = 'TIMEOUT' }
+    # "No applicable upgrade" is often a scope mismatch (user vs machine install): retry once per scope.
+    if ($kind -eq 'NOT_APPLICABLE') {
+        foreach ($scope in 'user', 'machine') {
+            $retry = Invoke-Process -FilePath $winget -ArgumentList ($wgArgs + @('--scope', $scope)) -TimeoutMinutes $TimeoutMinutes
+            $retryKind = if ($script:WingetCodes.ContainsKey($retry.ExitCode)) { $script:WingetCodes[$retry.ExitCode] } else { 'ERROR' }
+            Write-Log -Message ("winget {0}: retry --scope {1} -> exit {2} ({3})" -f $Package.Id, $scope, $retry.ExitCode, $retryKind)
+            if ($retryKind -in 'OK', 'REBOOT') { $code = $retry.ExitCode; $kind = $retryKind; break }
+        }
+    }
     Write-Log -Level $(if ($kind -in 'OK', 'REBOOT') { 'OK' } else { 'WARN' }) -Message ("winget {0}: exit {1} ({2})" -f $Package.Id, $code, $kind)
-    $base = @{ Source = 'winget'; Name = $Package.Name; Id = $Package.Id; From = $Package.Version; To = $Package.Available }
     switch ($kind) {
         'OK'                { return New-UpdateResult @base -Status Updated }
         'REBOOT'            { return New-UpdateResult @base -Status Updated -RebootRequired $true }
         'NOT_APPLICABLE'    { return New-UpdateResult @base -Status Skipped -Message 'msg.noApplicableUpdate' }
         'TECH_MISMATCH'     { return New-UpdateResult @base -Status Skipped -Message 'msg.techMismatch' }
         'REBOOT_TO_INSTALL' { return New-UpdateResult @base -Status Skipped -Message 'msg.rebootFirst' -RebootRequired $true }
-        'IN_USE'            { return New-UpdateResult @base -Status Failed -Message 'msg.appInUse' }
+        'IN_USE'            { return New-UpdateResult @base -Status Skipped -Message 'msg.appInUse' }
         'TIMEOUT'           { return New-UpdateResult @base -Status Failed -Message 'msg.timeout' }
         default             { return New-UpdateResult @base -Status Failed -Message ("exit 0x{0:X8}" -f $code) }
     }
 }
 
+# =====================================================================================
+# Remembered winget outcomes: packages that cannot be updated in place stop being offered as
+# recommended until a newer version appears (avoids the same failure on every run).
+# =====================================================================================
+
+function Get-WingetMemoryPath { Join-Path (Get-AppPaths).StateDir 'winget-memory.json' }
+
+function Get-WingetMemory {
+    $map = @{}
+    $file = Get-WingetMemoryPath
+    if (Test-Path $file) {
+        try {
+            $data = Get-Content $file -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($p in $data.PSObject.Properties) { $map[$p.Name] = $p.Value }
+        } catch { }
+    }
+    return $map
+}
+
+function Update-WingetMemory {
+    <# Kinds: 'notapplicable', 'tech' (other installer technology), 'mismatch' (version never changes). #>
+    param([Parameter(Mandatory)][object[]]$Results)
+    $map = Get-WingetMemory
+    foreach ($r in $Results) {
+        if ($r.Source -ne 'winget' -or -not $r.Id) { continue }
+        $kind = switch ($r.Message) { 'msg.noApplicableUpdate' { 'notapplicable' } 'msg.techMismatch' { 'tech' } 'msg.stillOutdated' { 'mismatch' } default { '' } }
+        if ($r.Status -eq 'Updated' -and -not $kind) { $map.Remove($r.Id); continue }
+        if ($kind) { $map[$r.Id] = [pscustomobject]@{ Available = [string]$r.To; Kind = $kind; At = (Get-Date).ToString('o') } }
+    }
+    $obj = New-Object PSObject
+    foreach ($k in $map.Keys) { $obj | Add-Member -NotePropertyName $k -NotePropertyValue $map[$k] }
+    Write-AtomicFile -Path (Get-WingetMemoryPath) -Content ($obj | ConvertTo-Json -Depth 4)
+}
 # =====================================================================================
 # Chocolatey
 # =====================================================================================
