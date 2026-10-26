@@ -48,7 +48,12 @@ $cert = $null; $createdCert = $false; $tsMeta = $null
 switch ($PSCmdlet.ParameterSetName) {
     'Pfx' {
         $pw = $PfxPassword
-        if (-not $pw -and $env:SIGN_PFX_PASSWORD) { $pw = ConvertTo-SecureString $env:SIGN_PFX_PASSWORD -AsPlainText -Force }
+        if (-not $pw -and $env:SIGN_PFX_PASSWORD) {
+            # CI passes the secret as an env var; build the SecureString directly (no plain-text conversion cmdlet).
+            $pw = New-Object System.Security.SecureString
+            foreach ($ch in $env:SIGN_PFX_PASSWORD.ToCharArray()) { $pw.AppendChar($ch) }
+            $pw.MakeReadOnly()
+        }
         if (-not $pw) { throw 'PFX password missing: pass -PfxPassword or set env SIGN_PFX_PASSWORD.' }
         $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
             (Resolve-Path -LiteralPath $PfxPath).ProviderPath, $pw, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
