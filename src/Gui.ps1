@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 # Never fail silently: log unexpected GUI errors and tell the user where the log is.
 trap {
     $msg = "{0:yyyy-MM-dd HH:mm:ss} {1}`n{2}" -f (Get-Date), $_.Exception.Message, $_.ScriptStackTrace
-    $logDir = Join-Path $env:ProgramData 'UpdateCenter\logs'
+    $logDir = if ($env:UPDATECENTER_DATADIR -and -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Join-Path $env:UPDATECENTER_DATADIR 'logs' } else { Join-Path $env:ProgramData 'UpdateCenter\logs' }
     try { Add-Content -Path (Join-Path $logDir 'gui-error.log') -Value $msg -Encoding UTF8 } catch { }
     if (-not $Snapshot) {
         try { [void][System.Windows.MessageBox]::Show("Update Center: $($_.Exception.Message)`n`n$logDir\gui-error.log", 'Update Center', 'OK', 'Error') } catch { }
@@ -44,10 +44,12 @@ $src = $PSScriptRoot
 # %TEMP% (a normal process of the same user could swap files there between compile and load).
 $appRootDir = Split-Path $PSScriptRoot -Parent
 if ($appRootDir -like "$env:ProgramFiles\*" -and ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    if (-not $env:UPDATECENTER_USERTEMP) { $env:UPDATECENTER_USERTEMP = $env:TEMP }   # Cleanup still cleans the user's temp folder
     $privTemp = Join-Path $appRootDir 'tmp'
     if (-not (Test-Path $privTemp)) { New-Item -ItemType Directory -Path $privTemp -Force | Out-Null }
     $env:TEMP = $privTemp; $env:TMP = $privTemp
-}Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
+}
+Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Report.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Scheduler.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Providers.psm1') -DisableNameChecking -Force
@@ -162,7 +164,7 @@ function Format-When { param($Date)
     if ($span.TotalMinutes -lt 1) { return (T 'time.justNow') }
     if ($span.TotalMinutes -lt 60) { return (T 'time.minutesAgo' @([int]$span.TotalMinutes)) }
     if ($d.Date -eq (Get-Date).Date) { return (T 'time.todayAt' @($d.ToString('HH:mm'))) }
-    return $d.ToString('ddd, dd.MM.  HH:mm')
+    return (Format-DayTime $d)
 }
 function ConvertTo-DateSafe { param($Value)
     <# Dates from files (reports, status, scan) may be missing or damaged: never throw, return $null. #>
@@ -170,10 +172,13 @@ function ConvertTo-DateSafe { param($Value)
     $d = [datetime]::MinValue
     if ([datetime]::TryParse([string]$Value, [ref]$d)) { return $d } else { return $null }
 }
+function Format-DayTime { param([datetime]$At)
+    if ((Get-CurrentLanguage) -eq 'de') { return $At.ToString('ddd, dd.MM., HH:mm') } else { return $At.ToString('ddd, MMM d, h:mm tt') }
+}
 function Format-At { param([datetime]$At)
     if ($At.Date -eq (Get-Date).Date) { return (T 'time.todayAt' @($At.ToString('HH:mm'))) }
     if ($At.Date -eq (Get-Date).Date.AddDays(1)) { return (T 'time.tomorrowAt' @($At.ToString('HH:mm'))) }
-    return $At.ToString('ddd, dd.MM.  HH:mm')
+    return (Format-DayTime $At)
 }
 
 # ------------------------------------------------------------------ in-app dialog
@@ -701,7 +706,8 @@ $view.Filter = [Predicate[object]]{
     param($r)
     $q = $script:search
     if ($q) {
-        if ($r.Name.IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and ([string]$r.Id).IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
+        if ($r.Name.IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and ([string]$r.Id).IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+            ([string]$r.Key).IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and ([string]$r.SourceLabel).IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
         if ($script:segment -eq 'All') { return $true }   # search covers updates AND installed programs
     }
     switch ($script:segment) {
@@ -728,6 +734,7 @@ function Update-Counts {
     $ui.TxtSelected.Text = T 'up.selected' @($sel.Count)
     $ui.BtnInstallSelected.Content = T 'up.installSelected' @($sel.Count)
     $ui.BtnInstallSelected.IsEnabled = ($sel.Count -gt 0) -and -not $script:running
+    $ui.UpdBar.Visibility = if ($sel.Count -gt 0) { 'Visible' } else { 'Collapsed' }   # no empty action bar
     $rec = @(Get-RecommendedRows)
     $ui.BtnRecommended.Content = T 'ov.installRecommended' @(@($rec | Where-Object { -not $_.IsCheck }).Count)
     $ui.BtnRecommended.IsEnabled = ($rec.Count -gt 0) -and -not $script:running
@@ -771,7 +778,7 @@ function Update-Hero {
 
 function Show-Summary {
     $next = Get-NextRun
-    $ui.TxtNext.Text = if ($config.Schedule.Type -eq 'Manual') { T 'ov.manualOnly' } elseif ($next) { $next.ToString('ddd, dd.MM.  HH:mm') } else { '-' }
+    $ui.TxtNext.Text = if ($config.Schedule.Type -eq 'Manual') { T 'ov.manualOnly' } elseif ($next) { (Format-DayTime $next) } else { '-' }
     $last = Get-LastReport
     $ui.TxtLastRun.Text = if ($last -and -not $last.DryRun) { Format-When ((ConvertTo-DateSafe $last.EndedAt)) } else { T 'ov.never' }
     Update-RebootBanner
@@ -876,7 +883,9 @@ function Start-Engine {
     param([ValidateSet('scan', 'install')][string]$Mode, [string[]]$Keys, [switch]$SelfOnly)
     if ($devMode) { return }
     # a run that was just launched has not written its status yet: never start a second one
-    if ($script:launchAt -or $script:running -or (Test-EngineRunning)) {
+    $locked = $false
+    try { $probe = [IO.File]::Open((Join-Path $paths.StateDir 'run.lock'), 'OpenOrCreate', 'ReadWrite', 'None'); $probe.Dispose() } catch [IO.IOException] { $locked = $true } catch { }
+    if ($locked -or $script:launchAt -or $script:running -or (Test-EngineRunning)) {
         Show-Dialog -Title (T 'ov.alreadyRunning') -Glyph ([string][char]0xE895) -Buttons @(@{ Text = 'OK'; Kind = 'Secondary' }); return
     }
     $engine = Join-Path $src 'UpdateEngine.ps1'
@@ -1232,6 +1241,9 @@ function Set-ProgramSort {
 
 function Update-ProgramEmpty {
     $n = 0; foreach ($r in $progView) { $n++; break }
+    if ($script:pageState.Programs -ne 'loading' -or $progRows.Count) {
+        $ui.TxtProgEmpty.Text = if ($script:progSearch) { T 'up.noMatch' @($script:progSearch) } else { T 'pg.empty' }
+    }
     $ui.TxtProgEmpty.Visibility = if ($n) { 'Collapsed' } else { 'Visible' }
 }
 
@@ -1304,7 +1316,10 @@ function Resolve-UninstallMessage { param([string]$Message)
     if (-not $Message) { return '' }
     $key = 'un.msg.' + $Message
     $t = T $key
-    if ($t -eq $key) { return $Message } else { return $t }
+    if ($t -ne $key) { return $t }
+    $direct = T $Message
+    if ($direct -ne $Message) { return $direct }   # full keys such as prog.cancelled
+    return $Message
 }
 
 function Show-LeftoverDialog { param([string]$Name, [object[]]$Items)
@@ -1359,7 +1374,7 @@ function Show-Startup { param([object[]]$Items)
     foreach ($it in @($Items)) {
         if (-not $it) { continue }
         $r = New-Object Alerion.ListRow
-        $r.Data = $it; $r.Key = [string]$it.Id; $r.Title = [string]$it.Name
+        $r.Data = $it; $r.Key = [string]$it.Id; $r.Title = ([string]$it.Name) -replace '-S-1-5-[\d-]+$', ''   # per-user task names end with the account SID
         $pub = [string]$it.Publisher; if ($pub -match '^\s*TODO') { $pub = '' }   # placeholder text some vendors ship in VersionInfo
         $r.Subtitle = (@($pub, (Get-StartupLocationText ([string]$it.Location))) | Where-Object { $_ }) -join ('  ' + [char]0xB7 + '  ')
         $risk = if ($it.PSObject.Properties.Name -contains 'Risk') { [string]$it.Risk } else { '' }
@@ -1571,6 +1586,17 @@ function Import-Security {
     }
 }
 
+function Resolve-ScanMessage { param([string]$Message)
+    <# Scan results carry a code ('clean', 'exit|5', 'threats-found|C:\...\mrt.log'); translate it. #>
+    if (-not $Message) { return '' }
+    $code, $detail = $Message -split '\|', 2
+    if ((T $code) -ne $code) { return T $code }                       # already a full key (e.g. prog.cancelled)
+    $k = 'sec.msg.' + $code
+    $t = if ($detail) { T $k @($detail) } else { T $k }
+    if ($t -ne $k) { return $t }
+    return Resolve-Text $Message
+}
+
 function Start-Scan { param($Row)
     if ($script:scanAct -and $activities.Contains($script:scanAct)) {
         # the running scan's button is its cancel button
@@ -1591,7 +1617,7 @@ function Start-Scan { param($Row)
             $res = @($out)[0]
             $Row.State = (T ('sec.result.' + $res.Status)) + $(if ($res.DurationSec) { ' ' + [char]0xB7 + ' ' + (T 'sec.result.duration' @(('{0} min' -f [int][Math]::Ceiling($res.DurationSec / 60)))) } else { '' })
             $Row.StateBrush = switch ($res.Status) { 'Clean' { '#30D158' } 'ThreatsRemoved' { '#FF9F0A' } 'ThreatsFound' { '#FF453A' } 'Failed' { '#FF453A' } default { '#8A93A1' } }
-            $msg = if ($res.Message) { $k = 'sec.msg.' + $res.Message; $t = T $k; if ($t -ne $k) { $t } else { Resolve-Text ([string]$res.Message) } } else { '' }
+            $msg = Resolve-ScanMessage ([string]$res.Message)
             if (@($res.Threats).Count -or $res.Status -in 'ThreatsFound', 'Failed') {
                 Show-Dialog -Title (T ('sec.result.' + $res.Status)) -Text ((@($res.Threats) -join "`n") + $(if ($msg) { "`n" + $msg } else { '' })) -Glyph ([string][char]0xEA18) -Colors @('#F87171', '#DC2626') -Buttons @(@{ Text = 'OK'; Kind = 'Secondary' })
             } else { Show-AppToast $Row.State $(if ($res.Status -eq 'Cancelled') { 'info' } else { 'ok' }) }

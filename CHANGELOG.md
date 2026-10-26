@@ -2,6 +2,54 @@
 
 Alle relevanten Änderungen an Update Center (bis v1.2.0 „ALERION Update“). Format nach *Keep a Changelog*, Versionierung nach SemVer.
 
+## [1.6.0] - 2026-10-26
+### Security (Prüfung durch ein Review-Team)
+- **Selbst-Update kann die App nicht mehr beschädigen**: Pakete werden im geschützten Programmordner entpackt
+  (nicht mehr im Cache, den die Aufräumroutine anfasst). Der Installer prüft das Paket vorab, sichert die alte
+  Version, stellt sie bei jedem Fehler automatisch wieder her und schreibt ein Installationsprotokoll.
+- Signierte Pakete werden jetzt wirklich festgenagelt (der signierte Katalog wird mitinstalliert).
+- Datenordner: Besitz und Rechte werden vollständig zurückgesetzt (auch vorab angelegte Unterordner); alte
+  Einstellungen werden nur aus einem von Administratoren angelegten Ordner übernommen. Update-Quelle fest verdrahtet.
+- Erhöhte Prozesse kompilieren und entpacken nicht mehr im Benutzer-TEMP.
+- Sperrdatei statt globalem Mutex: kein „hängender“ Zustand nach Abbruch, nicht von Standardbenutzern blockierbar.
+- Launcher (Epic, Discord) und Hersteller-Setups laufen ohne Administratorrechte; Programme aus Benutzerordnern
+  werden nie erhöht gestartet. Release nur noch aus `main`, mit Paketprüfung vor dem Veröffentlichen.
+
+### Added
+- **ASUS-Treiber automatisch**: Abgleich über die ASUS-Support-Daten des Mainboards. Signierte Treiberpakete
+  (z. B. LAN, USB-Audio) werden automatisch über die Windows-Treiberinstallation eingespielt, Hersteller-Setups
+  (z. B. Chipsatz) geprüft und zum Installieren geöffnet, BIOS nur angezeigt. Alle Downloads nur von asus.com,
+  mit SHA-256- und Signaturprüfung.
+- **App-Update sichtbar**: Dialog „Update Center wird aktualisiert“, Benachrichtigung nach dem Update und
+  „Neu in Version …“ beim ersten Start.
+- **Scans mit Fortschritt und Live-Protokoll**: geschätzter Fortschritt aus der Dauer früherer Scans, Protokoll
+  mit allen Schritten und gefundenen Bedrohungen – auch für Aufräumen und Deinstallation.
+- **Autostart**: Ansicht „Wie im Task-Manager“ und „Erweitert“ (mit Warnhinweis), Risiko-Erklärung je Eintrag,
+  mehr Schutz (Hardware-Dienste des PC-Herstellers, Windows-Teile, Systemaufgaben), **eigene Programme hinzufügen**.
+- **Übersicht neu**: Schnellaktionen, letzte Läufe, Status aller Module, laufende Aufgaben.
+- **Seitenleiste** zeigt mit einem pulsierenden Punkt, wo gerade etwas läuft.
+- **Rechtsklick-Menüs** in allen Listen (Programme, Autostart, Aufräumen, Sicherheit, Aufgaben, Verlauf).
+- **Darstellung anpassbar**: Akzentfarbe, Größe der Oberfläche, Startseite.
+- Tastenkürzel: Strg+1–8 (Seiten), Strg+F (Suche der Seite), F5 (Seite neu laden), Strg+S (Einstellungen speichern).
+
+### Changed
+- Statusmeldungen während eines Laufs sind jetzt **deutsch** (bzw. in der gewählten Sprache).
+- **Ausschließen** ist ein reines Symbol: offenes Auge = wird aktualisiert, durchgestrichen = ausgeschlossen;
+  beim Überfahren zeigt es, was ein Klick bewirkt.
+
+### Fixed
+- Dialoge verdrängen sich nicht mehr gegenseitig; der Neustart-Countdown lässt sich nicht versehentlich wegklicken.
+- Doppelklicks starten keine zweite Installation; nur eine Deinstallation gleichzeitig.
+- Hängende Ladevorgänge brechen nach einer Zeitgrenze ab; Fehler in der Oberfläche werden protokolliert statt
+  das Fenster zu schließen; beschädigte Datumswerte führen nicht mehr zu Fehlern.
+- Ungültige Uhrzeiten in den Einstellungen werden erkannt; bei Speicherfehlern bleibt die Seite offen.
+- Sprachwechsel aktualisiert alle Seiten; Datumsangaben folgen der App-Sprache.
+- Nach Prüfung durch ein Test-Team: Scan-Ergebnisse und Hersteller-Hinweise sind übersetzt (keine englischen
+  Texte oder Schlüssel mehr), das Live-Protokoll in der Übersicht zeigt wieder einzelne Zeilen, das geplante
+  Aufräumen meldet die freigegebene Größe korrekt, beschädigte Einstellungsdateien führen nie zu einem Absturz,
+  „Temporäre Dateien“ räumt weiterhin den Benutzer-TEMP auf, Einstellungen älterer Versionen werden sicher
+  übernommen, Programm-Suche zeigt „nichts gefunden“ statt „lädt“, die Aktionsleiste erscheint nur mit Auswahl.
+
 ## [1.5.1] - 2026-10-26
 ### Fixed
 - **App-Update schlug fehl** („Der Prozess kann nicht auf die Datei … icon.ico zugreifen“): Das Selbst-Update kopierte

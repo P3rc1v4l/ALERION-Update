@@ -18,17 +18,21 @@ $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.Wind
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     if ($NoLaunch) { $argList += ' -NoLaunch' }
+    if ($Quiet) { $argList += ' -Quiet' }
     Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs -ArgumentList $argList
     exit 0
 }
 $env:PSModulePath = "$env:ProgramFiles\WindowsPowerShell\Modules;$PSHOME\Modules"
 # Compile (Add-Type in Common.psm1) in an admin-only folder, not in the user's %TEMP%.
+$env:UPDATECENTER_USERTEMP = $env:TEMP
 $privTemp = Join-Path $env:ProgramFiles 'Update Center\tmp'
 New-Item -ItemType Directory -Path $privTemp -Force | Out-Null
 $env:TEMP = $privTemp; $env:TMP = $privTemp
 function Say { param([string]$Text, [string]$Color = 'Gray') if (-not $Quiet) { Write-Host $Text -ForegroundColor $Color } }
-$installLog = Join-Path $env:ProgramData ('UpdateCenter\logs\install-{0:yyyyMMdd-HHmmss}.log' -f (Get-Date))
-function Write-InstallLog { param([string]$Text) try { New-Item -ItemType Directory -Path (Split-Path $installLog) -Force | Out-Null; Add-Content -Path $installLog -Value ("{0:HH:mm:ss}  {1}" -f (Get-Date), $Text) -Encoding UTF8 } catch { } }
+# Install log lives in the (admin-only) program folder: ProgramData may not be hardened yet.
+$installLog = Join-Path $env:ProgramFiles 'Update Center\install.log'
+function Write-InstallLog { param([string]$Text) try { Add-Content -Path $installLog -Value ("{0:yyyy-MM-dd HH:mm:ss}  {1}" -f (Get-Date), $Text) -Encoding UTF8 } catch { } }
+try { if ((Test-Path $installLog) -and (Get-Item $installLog).Length -gt 512KB) { Remove-Item $installLog -Force } } catch { }
 Write-InstallLog "Install from $here (quiet=$Quiet)"
 # Any unexpected error is logged (quiet installs have no window) and the app is reopened if it was open.
 trap {
@@ -63,9 +67,10 @@ while (@(& $appProcs | Where-Object { $_.CommandLine -like '*UpdateEngine.ps1*' 
     if ((Get-Date) -gt $deadline) { Write-InstallLog 'ABORT: an update run is still active'; throw 'An update run is active - please wait until it has finished.' }
     Start-Sleep -Seconds 10
 }
-# Hold the engine's run lock while files are replaced, so no run can start in between.
-$stateDir = Join-Path $env:ProgramData 'UpdateCenter\state'
-New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+# Harden the data folder first (removes planted links, resets owner/ACL), then hold the engine's run lock
+# while files are replaced, so no run can start in between.
+Initialize-DataDir -Harden
+$stateDir = (Get-AppPaths).StateDir
 $runLock = $null
 while (-not $runLock) {
     try { $runLock = [IO.File]::Open((Join-Path $stateDir 'run.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
@@ -109,7 +114,8 @@ if ((Resolve-Path $here).Path -ne (Resolve-Path $target).Path) {
         if (Test-Path $backup) {
             foreach ($item in $items) {
                 $b = Join-Path $backup $item; $t = Join-Path $target $item
-                if (Test-Path $b) { Remove-Item $t -Recurse -Force -ErrorAction SilentlyContinue; Copy-Item $b -Destination $t -Recurse -Force -ErrorAction SilentlyContinue }
+                Remove-Item $t -Recurse -Force -ErrorAction SilentlyContinue   # also drops items that are new in the package
+                if (Test-Path $b) { Copy-Item $b -Destination $t -Recurse -Force -ErrorAction SilentlyContinue }
             }
         }
         $runLock.Dispose()
@@ -179,7 +185,8 @@ New-ItemProperty -Path $product.UninstallKey -Name NoModify -Value 1 -PropertyTy
 New-ItemProperty -Path $product.UninstallKey -Name NoRepair -Value 1 -PropertyType DWord -Force | Out-Null
 
 # ------------------------------------------------------------------ remove the v1.x installation
-if (Test-Path $product.LegacyDataDir) {
+# (only once its settings have arrived in the new data folder)
+if ((Test-Path $product.LegacyDataDir) -and (Test-Path $paths.ConfigPath)) {
     Remove-Item $product.LegacyDataDir -Recurse -Force -ErrorAction SilentlyContinue
     $parent = Split-Path $product.LegacyDataDir -Parent
     if ((Test-Path $parent) -and -not (Get-ChildItem $parent -Force)) { Remove-Item $parent -Force -ErrorAction SilentlyContinue }

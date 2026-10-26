@@ -335,9 +335,11 @@ function Invoke-Check {
         if ($null -eq $r) { return (New-Check $Id 'Unknown' (T 'sec.detail.noData') $FixUri) }
         return $r
     } catch {
-        $msg = ($_.Exception.Message -split "`r?`n")[0]
-        if ($msg.Length -gt 120) { $msg = $msg.Substring(0, 120) }
-        return (New-Check $Id 'Unknown' (T 'sec.detail.notAvailable' @($msg)) $FixUri)
+        # The OS message is in the Windows language: show a translated reason and keep the raw text in the log.
+        Write-Log -Level WARN -Message ("Security check {0}: {1}" -f $Id, $_.Exception.Message)
+        $denied = $_.Exception -is [System.UnauthorizedAccessException] -or [string]$_.Exception.HResult -eq '-2147024891' -or
+                  $_.FullyQualifiedErrorId -match 'Access|0x80070005' -or $_.Exception.Message -match '0x80070005|Access is denied|Zugriff verweigert'
+        return (New-Check $Id 'Unknown' $(if ($denied) { T 'sec.detail.needsAdmin' } else { T 'sec.detail.notAvailableShort' }) $FixUri)
     }
 }
 
@@ -794,7 +796,7 @@ function Invoke-DefenderScan {
         try {
             $proc = Start-Process -FilePath $mpcmd -ArgumentList @('-Scan', '-ScanType', $st) -PassThru -WindowStyle Hidden
         } catch {
-            return (New-ScanResult $Type 'Failed' @() ("MpCmdRun failed to start: " + $_.Exception.Message) ((Get-Date) - $started).TotalSeconds)
+            return (New-ScanResult $Type 'Failed' @() ('start-failed|' + $_.Exception.Message) ((Get-Date) - $started).TotalSeconds)
         }
         $w = Wait-ScanProcess -Process $proc -Progress $Progress -AllowCancel $true -TimeoutMinutes 720 -OnTick {
             param($el)
@@ -813,7 +815,7 @@ function Invoke-DefenderScan {
         try {
             Start-MpScan -ScanType $scanType -ErrorAction Stop
         } catch {
-            return (New-ScanResult $Type 'Failed' @() ("Start-MpScan failed: " + $_.Exception.Message) ((Get-Date) - $started).TotalSeconds)
+            return (New-ScanResult $Type 'Failed' @() ('start-failed|' + $_.Exception.Message) ((Get-Date) - $started).TotalSeconds)
         }
     }
     $dur = ((Get-Date) - $started).TotalSeconds
@@ -834,11 +836,11 @@ function Invoke-DefenderScan {
     } catch { Write-Log -Level WARN -Message "Reading detections failed: $($_.Exception.Message)" }
     if ($threats.Count -eq 0) {
         # MpCmdRun reports scan errors through its exit code; only trust it when no detection explains it.
-        if ($exit -ne 0) { return (New-ScanResult $Type 'Failed' @() ("MpCmdRun exit code " + $exit) $dur) }
-        return (New-ScanResult $Type 'Clean' @() 'No threats found' $dur)
+        if ($exit -ne 0) { return (New-ScanResult $Type 'Failed' @() ('exit|' + $exit) $dur) }
+        return (New-ScanResult $Type 'Clean' @() 'clean' $dur)
     }
-    if ($active) { return (New-ScanResult $Type 'ThreatsFound' $threats 'Threats found, some still active - open Windows Security' $dur) }
-    return (New-ScanResult $Type 'ThreatsRemoved' $threats 'Threats found and handled by Defender' $dur)
+    if ($active) { return (New-ScanResult $Type 'ThreatsFound' $threats 'threats-active' $dur) }
+    return (New-ScanResult $Type 'ThreatsRemoved' $threats 'threats-handled' $dur)
 }
 
 function Write-MrtLogLines {
@@ -902,15 +904,15 @@ function Invoke-MrtScan {
     } catch { Write-Log -Level WARN -Message "mrt.log unreadable: $($_.Exception.Message)" }
     Write-MrtLogLines -Progress $Progress -Text $text
     if (-not $text.Trim()) {
-        if ($r.ExitCode -eq 0) { return (New-ScanResult $Type 'Clean' @() 'Finished without findings (no log entry)' $dur) }
-        return (New-ScanResult $Type 'Failed' @() ("MRT exit code " + $r.ExitCode + ", no log entry") $dur)
+        if ($r.ExitCode -eq 0) { return (New-ScanResult $Type 'Clean' @() 'clean' $dur) }
+        return (New-ScanResult $Type 'Failed' @() ('exit|' + $r.ExitCode) $dur)
     }
     $p = ConvertFrom-MrtLog $text
-    if ($p.Clean) { return (New-ScanResult $Type 'Clean' @() 'No infection found' $dur) }
-    if ($p.Infected -and $p.Removed) { return (New-ScanResult $Type 'ThreatsRemoved' $p.Threats 'Threats found and removed' $dur) }
-    if ($p.Infected) { return (New-ScanResult $Type 'ThreatsFound' $p.Threats ("Threats found - see " + $log) $dur) }
-    if ($r.ExitCode -eq 0 -or $p.ReturnCode -eq 0) { return (New-ScanResult $Type 'Clean' @() 'Finished without findings' $dur) }
-    return (New-ScanResult $Type 'Failed' @() ("MRT exit code " + $r.ExitCode) $dur)
+    if ($p.Clean) { return (New-ScanResult $Type 'Clean' @() 'clean' $dur) }
+    if ($p.Infected -and $p.Removed) { return (New-ScanResult $Type 'ThreatsRemoved' $p.Threats 'threats-removed' $dur) }
+    if ($p.Infected) { return (New-ScanResult $Type 'ThreatsFound' $p.Threats ('threats-found|' + $log) $dur) }
+    if ($r.ExitCode -eq 0 -or $p.ReturnCode -eq 0) { return (New-ScanResult $Type 'Clean' @() 'clean' $dur) }
+    return (New-ScanResult $Type 'Failed' @() ('exit|' + $r.ExitCode) $dur)
 }
 
 function Get-CbsLogPath { return (Join-Path ([Environment]::GetFolderPath('Windows')) 'Logs\CBS\CBS.log') }
@@ -941,15 +943,15 @@ function Invoke-IntegrityScan {
     Set-Prog $Progress -Percent -1 -Text (T 'prog.sfcStart' @('00:00')) -CanCancel $true -CanPause $false -Phase 'sfc' -Estimated $false
     $r = Invoke-ScanTool -FilePath $sfc -ArgumentList @('/scannow') -Kind sfc -Progress $Progress -AllowCancel $true -TimeoutMinutes 240 -TextKey 'prog.sfc' -TextKeyNoPct 'prog.sfcStart'
     if ($r.Cancelled) { return (New-ScanResult 'Integrity' 'Cancelled' @() 'prog.cancelled' ((Get-Date) - $started).TotalSeconds) }
-    if ($r.TimedOut) { return (New-ScanResult 'Integrity' 'Failed' @() 'sfc timeout' ((Get-Date) - $started).TotalSeconds) }
+    if ($r.TimedOut) { return (New-ScanResult 'Integrity' 'Failed' @() 'timeout' ((Get-Date) - $started).TotalSeconds) }
     $state = ConvertFrom-SfcOutput $r.Output
     Write-Log -Message "sfc result: $state (exit $($r.ExitCode))"
     Write-SfcResultLog -Progress $Progress -State $state -ExitCode $r.ExitCode
     switch ($state) {
-        'Clean'    { return (New-ScanResult 'Integrity' 'Clean' @() 'No integrity violations' ((Get-Date) - $started).TotalSeconds) }
-        'Repaired' { return (New-ScanResult 'Integrity' 'ThreatsRemoved' @() 'Corrupt system files were repaired' ((Get-Date) - $started).TotalSeconds) }
-        'PendingReboot' { return (New-ScanResult 'Integrity' 'Failed' @() 'Restart Windows first (pending repair), then run again' ((Get-Date) - $started).TotalSeconds) }
-        'Unknown'  { return (New-ScanResult 'Integrity' 'Failed' @() ("sfc result not recognised (exit " + $r.ExitCode + ")") ((Get-Date) - $started).TotalSeconds) }
+        'Clean'    { return (New-ScanResult 'Integrity' 'Clean' @() 'sfc-clean' ((Get-Date) - $started).TotalSeconds) }
+        'Repaired' { return (New-ScanResult 'Integrity' 'ThreatsRemoved' @() 'sfc-repaired' ((Get-Date) - $started).TotalSeconds) }
+        'PendingReboot' { return (New-ScanResult 'Integrity' 'Failed' @() 'sfc-pending' ((Get-Date) - $started).TotalSeconds) }
+        'Unknown'  { return (New-ScanResult 'Integrity' 'Failed' @() ('sfc-unknown|' + $r.ExitCode) ((Get-Date) - $started).TotalSeconds) }
     }
     # Unfixed corruption -> repair the component store with DISM, then verify again with sfc.
     if (Test-ProgCancel $Progress) { return (New-ScanResult 'Integrity' 'Cancelled' @() 'prog.cancelled' ((Get-Date) - $started).TotalSeconds) }
@@ -958,11 +960,11 @@ function Invoke-IntegrityScan {
     # Interrupting a component-store repair can leave the store inconsistent: not cancellable, not pausable.
     Set-Prog $Progress -Percent -1 -Text (T 'prog.noCancelRepair') -CanCancel $false -CanPause $false -Phase 'dism'
     $d = Invoke-ScanTool -FilePath $dism -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth') -Kind dism -Progress $Progress -AllowCancel $false -TimeoutMinutes 240 -TextKey 'prog.dismRepair' -TextKeyNoPct 'prog.noCancelRepair'
-    if ($d.TimedOut) { return (New-ScanResult 'Integrity' 'Failed' @() 'DISM timeout' ((Get-Date) - $started).TotalSeconds) }
+    if ($d.TimedOut) { return (New-ScanResult 'Integrity' 'Failed' @() 'timeout' ((Get-Date) - $started).TotalSeconds) }
     if ($d.ExitCode -ne 0) {
         Add-ProgLog $Progress 'log.int.dismFail' @($d.ExitCode)
         Add-ProgLog $Progress 'log.int.cbs' @((Get-CbsLogPath))
-        return (New-ScanResult 'Integrity' 'ThreatsFound' @() ("sfc found unfixable files; DISM failed (exit " + $d.ExitCode + ")") ((Get-Date) - $started).TotalSeconds)
+        return (New-ScanResult 'Integrity' 'ThreatsFound' @() ('dism-failed|' + $d.ExitCode) ((Get-Date) - $started).TotalSeconds)
     }
     if (Test-ProgCancel $Progress) { return (New-ScanResult 'Integrity' 'Cancelled' @() 'prog.cancelled' ((Get-Date) - $started).TotalSeconds) }
     Add-ProgLog $Progress 'log.int.dismOk'
@@ -973,8 +975,8 @@ function Invoke-IntegrityScan {
     $state2 = ConvertFrom-SfcOutput $r2.Output
     Write-SfcResultLog -Progress $Progress -State $state2 -ExitCode $r2.ExitCode
     $dur = ((Get-Date) - $started).TotalSeconds
-    if ($state2 -eq 'Clean' -or $state2 -eq 'Repaired') { return (New-ScanResult 'Integrity' 'ThreatsRemoved' @() 'Repaired with DISM and sfc' $dur) }
-    return (New-ScanResult 'Integrity' 'ThreatsFound' @() 'Some system files could not be repaired - see CBS.log' $dur)
+    if ($state2 -eq 'Clean' -or $state2 -eq 'Repaired') { return (New-ScanResult 'Integrity' 'ThreatsRemoved' @() 'dism-repaired' $dur) }
+    return (New-ScanResult 'Integrity' 'ThreatsFound' @() 'sfc-unfixable' $dur)
 }
 
 function Write-ScanFinishLog {
@@ -999,7 +1001,11 @@ function Start-SecurityScan {
     )
     $started = Get-Date
     try {
-        if ($DryRun) { return (New-ScanResult $Type 'WouldRun' @() 'dry-run' 0) }
+        if ($DryRun) {
+        Set-Prog $Progress -Percent 100 -Text (T 'prog.done') -CanCancel $false -CanPause $false
+        Add-ProgLog $Progress 'sec.msg.dry-run'
+        return (New-ScanResult $Type 'WouldRun' @() 'dry-run' 0)
+    }
         if (-not (Test-IsAdmin)) { return (New-ScanResult $Type 'Skipped' @() 'needs-admin' 0) }
         Initialize-DataDir
         if (Test-ProgCancel $Progress) { return (New-ScanResult $Type 'Cancelled' @() 'prog.cancelled' 0) }

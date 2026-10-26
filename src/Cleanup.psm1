@@ -256,7 +256,9 @@ function Get-CleanupTargets {
             if ($hook -and (Test-CleanupPath -Path $hook -Root ([IO.Path]::GetTempPath()))) {
                 $t.Add((New-Target -Root $hook -MinAgeDays 0)); break
             }
-            if ($env:TEMP) { $t.Add((New-Target -Root $env:TEMP -MinAgeDays 1)) }
+            # The elevated app points %TEMP% to its private folder; the user's temp folder is remembered separately.
+            $userTemp = if ($env:UPDATECENTER_USERTEMP) { $env:UPDATECENTER_USERTEMP } else { $env:TEMP }
+            if ($userTemp) { $t.Add((New-Target -Root $userTemp -MinAgeDays 1)) }
             if ((Test-IsAdmin) -and $sys) { $t.Add((New-Target -Root (Join-Path $sys 'Temp') -MinAgeDays 1)) }
         }
         'wucache' { if ($sys) { $t.Add((New-Target -Root (Join-Path $sys 'SoftwareDistribution\Download'))) } }

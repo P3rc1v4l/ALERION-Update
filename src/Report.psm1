@@ -5,9 +5,9 @@ Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'Common.psm1') -DisableNameChecking
 
 function Resolve-Text {
-    <# Translates values that are i18n keys (msg.*), leaves everything else untouched. #>
+    <# Translates values that are i18n keys (msg.*, vu.*, sig.* ...); anything else (or an unknown key) stays as it is. #>
     param([string]$Value)
-    if ($Value -and $Value -like 'msg.*') { return (T $Value) }
+    if ($Value -and $Value -match '^[a-z]+(\.[A-Za-z0-9-]+)+$') { return (T $Value) }   # T returns the key itself when unknown
     return $Value
 }
 

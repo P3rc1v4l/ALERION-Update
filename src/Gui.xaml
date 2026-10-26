@@ -650,7 +650,7 @@
           <Grid>
             <StackPanel Margin="0,0,330,0"><TextBlock x:Name="TxtUpdatesTitle" Style="{StaticResource Title}"/><TextBlock x:Name="TxtUpdatesSub" Foreground="#8A93A1" Margin="2,3,0,0"/></StackPanel>
             <Grid HorizontalAlignment="Right" Width="310" VerticalAlignment="Center">
-              <TextBox x:Name="TxtSearch" Padding="34,0,12,0" Height="38"/>
+              <TextBox x:Name="TxtSearch" Padding="17,0,6,0" Height="38"/>
               <TextBlock Text="&#xE721;" FontFamily="{StaticResource Icons}" Foreground="#8A93A1" Margin="13,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
               <TextBlock x:Name="TxtSearchHint" Foreground="#6B7380" Margin="36,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
             </Grid>
@@ -706,12 +706,12 @@
                       <Style.Triggers><DataTrigger Binding="{Binding IsUpdate}" Value="False"><Setter Property="Visibility" Value="Hidden"/></DataTrigger></Style.Triggers></Style></CheckBox.Style>
                   </CheckBox>
                   <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" ToolTip="{Binding Name}"/>
+                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" ToolTip="{Binding Name}" TextTrimming="CharacterEllipsis"/>
                     <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
                       <TextBlock Text="{Binding SourceLabel}" Foreground="#6B7380" FontSize="11.5"/>
                       <TextBlock Text="  &#x00B7;  " Foreground="#6B7380" FontSize="11.5"/>
-                      <TextBlock Text="{Binding Id}" Foreground="#6B7380" FontSize="11.5" MaxWidth="300"/>
-                      <TextBlock Text="{Binding Note}" Foreground="#8A93A1" FontSize="11.5" Margin="10,0,0,0" MaxWidth="300" ToolTip="{Binding Note}"/>
+                      <TextBlock Text="{Binding Id}" Foreground="#6B7380" FontSize="11.5" MaxWidth="260" TextTrimming="CharacterEllipsis" ToolTip="{Binding Id}"/>
+                      <TextBlock Text="{Binding Note}" Foreground="#8A93A1" FontSize="11.5" Margin="10,0,0,0" MaxWidth="300" ToolTip="{Binding Note}" TextTrimming="CharacterEllipsis"/>
                       <Button x:Name="RowAction" Content="{Binding ActionText}" FontSize="11.5" Padding="8,0" Margin="6,0,0,0">
                         <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Link}"><Style.Triggers>
                           <DataTrigger Binding="{Binding ActionText}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
@@ -743,7 +743,7 @@
               <TextBlock x:Name="TxtEmpty" Foreground="#8A93A1" Margin="0,12,0,0" HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="420"/>
             </StackPanel>
             <!-- floating action bar -->
-            <Border VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,18" CornerRadius="18" Padding="18,10,10,10" Background="#F21B1E25" BorderBrush="#24FFFFFF" BorderThickness="1" MinWidth="560">
+            <Border x:Name="UpdBar" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,18" CornerRadius="18" Padding="18,10,10,10" Background="#F21B1E25" BorderBrush="#24FFFFFF" BorderThickness="1" MinWidth="560">
               <Border.Effect><DropShadowEffect BlurRadius="28" ShadowDepth="6" Opacity="0.5"/></Border.Effect>
               <Grid>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -762,7 +762,7 @@
           <Grid>
             <StackPanel Margin="0,0,330,0"><TextBlock x:Name="TxtProgramsTitle" Style="{StaticResource Title}"/><TextBlock x:Name="TxtProgramsSub" Foreground="#8A93A1" Margin="2,3,0,0" TextWrapping="Wrap" TextTrimming="None"/></StackPanel>
             <Grid HorizontalAlignment="Right" Width="310" VerticalAlignment="Center">
-              <TextBox x:Name="TxtProgSearch" Padding="34,0,12,0" Height="38"/>
+              <TextBox x:Name="TxtProgSearch" Padding="17,0,6,0" Height="38"/>
               <TextBlock Text="&#xE721;" FontFamily="{StaticResource Icons}" Foreground="#8A93A1" Margin="13,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
               <TextBlock x:Name="TxtProgSearchHint" Foreground="#6B7380" Margin="36,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
             </Grid>
@@ -819,7 +819,7 @@
           <Grid>
             <StackPanel Margin="0,0,330,0"><TextBlock x:Name="TxtStartupTitle" Style="{StaticResource Title}"/><TextBlock x:Name="TxtStartupSub" Foreground="#8A93A1" Margin="2,3,0,0" TextWrapping="Wrap" TextTrimming="None"/></StackPanel>
             <Grid HorizontalAlignment="Right" Width="310" VerticalAlignment="Center">
-              <TextBox x:Name="TxtStartSearch" Padding="34,0,12,0" Height="38"/>
+              <TextBox x:Name="TxtStartSearch" Padding="17,0,6,0" Height="38"/>
               <TextBlock Text="&#xE721;" FontFamily="{StaticResource Icons}" Foreground="#8A93A1" Margin="13,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
               <TextBlock x:Name="TxtStartSearchHint" Foreground="#6B7380" Margin="36,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
             </Grid>

@@ -78,6 +78,11 @@ function Protect-Directory {
        Prevents a non-elevated process from planting config or code that later runs elevated. #>
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    # Junctions/symlinks planted by a standard user must never redirect the (elevated, recursive) ACL
+    # reset to another folder: refuse a linked root, remove links inside (removes the link only).
+    if ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing to harden a linked folder: $Path" }
+    Get-ChildItem -LiteralPath $Path -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | Sort-Object { $_.FullName.Length } -Descending |
+        ForEach-Object { try { if ($_.PSIsContainer) { [IO.Directory]::Delete($_.FullName) } else { [IO.File]::Delete($_.FullName) } } catch { } }
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
     $acl.SetAccessRuleProtection($true, $false)
     $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
@@ -107,7 +112,8 @@ function Initialize-DataDir {
     param([switch]$Harden)
     # One-time migration of settings, reports and logs from the v1.x location.
     # Only from an admin-owned legacy folder: a standard user could otherwise plant a config there.
-    if ((Test-IsAdmin) -and $script:DataDir -eq $script:Product.DataDir -and -not (Test-Path $script:DataDir) -and (Test-Path $script:Product.LegacyDataDir) -and
+    # Keyed on the config file (not the folder): installer and engine create log/state folders earlier.
+    if ((Test-IsAdmin) -and $script:DataDir -eq $script:Product.DataDir -and -not (Test-Path $script:ConfigPath) -and (Test-Path $script:Product.LegacyDataDir) -and
         (Test-AdminOwned $script:Product.LegacyDataDir)) {
         New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
         Copy-Item (Join-Path $script:Product.LegacyDataDir '*') -Destination $script:DataDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -158,10 +164,14 @@ function Merge-Config {
     <# Copies every key that exists in the defaults from the user config (one level of nesting).
        Unknown keys are dropped, missing keys get defaults, so old configs migrate automatically. #>
     param($Defaults, $User)
-    if ($null -eq $User) { return $Defaults }
+    if ($null -eq $User -or $User -isnot [System.Management.Automation.PSCustomObject]) { return $Defaults }
+    $userNames = @($User.PSObject.Properties | ForEach-Object { $_.Name })
     foreach ($p in $Defaults.PSObject.Properties) {
-        if (-not ($User.PSObject.Properties.Name -contains $p.Name)) { continue }
+        if ($userNames -notcontains $p.Name) { continue }
         $uv = $User.($p.Name)
+        # a value of the wrong kind (e.g. "Schedule": "daily" or null) keeps the default instead of breaking the app
+        if ($p.Value -is [System.Management.Automation.PSCustomObject] -and $uv -isnot [System.Management.Automation.PSCustomObject]) { continue }
+        if ($null -eq $uv -and $null -ne $p.Value) { continue }
         if ($p.Value -is [System.Management.Automation.PSCustomObject] -and $uv -is [System.Management.Automation.PSCustomObject] -and
             @($p.Value.PSObject.Properties).Count -eq 0) {
             $Defaults.($p.Name) = $uv   # free-form maps (e.g. PriorityOverrides) are taken as a whole
@@ -220,14 +230,15 @@ function Get-Config {
     }
     $cfg = Merge-Config -Defaults $defaults -User $user
     # Schema 1 -> 2: new keys (ScheduleAction, AutoInstallPriorities) are filled from the defaults above.
-    if ($user -and [int]$user.SchemaVersion -lt 2) {
+    if ($user -isnot [System.Management.Automation.PSCustomObject]) { if ($null -ne $user) { Write-Log -Level WARN -Message 'config.json has no settings object, using defaults' }; $user = $null }
+    if ($user -and (-not $user.PSObject.Properties['SchemaVersion'] -or [int]$user.SchemaVersion -lt 2)) {
         $cfg.SchemaVersion = 2
         if (Test-IsAdmin) { try { Save-Config -Config $cfg } catch { Write-Log -Level WARN -Message "Config migration not saved: $($_.Exception.Message)" } }
     }
     # The update source is fixed: code from it runs elevated, so it must never come from a config value.
     $cfg.SelfUpdate.Repo = 'P3rc1v4l/UpdateCenter'
-    $problems = Test-Config $cfg
-    if ($problems.Count -gt 0) {
+    try { $problems = Test-Config $cfg } catch { $problems = @("config check failed: $($_.Exception.Message)") }
+    if (@($problems).Count -gt 0) {
         Write-Log -Level WARN -Message ("Invalid config, falling back to defaults: " + ($problems -join '; '))
         $cfg = Get-DefaultConfig
     }
@@ -316,7 +327,8 @@ function Update-Status {
     if ($Percent -ge 0) { $script:Status.Percent = [Math]::Min(100, $Percent) }
     if ($PSBoundParameters.ContainsKey('Current')) { $script:Status.Current = $Current }
     if ($LogLine) {
-        $script:Status.Log = @($script:Status.Log + ("{0:HH:mm:ss}  {1}" -f (Get-Date), $LogLine)) | Select-Object -Last 200
+        # @() on both sides: after the first line Log would otherwise be a string and "+" would glue lines together
+        $script:Status.Log = @(@(@($script:Status.Log) + ("{0:HH:mm:ss}  {1}" -f (Get-Date), $LogLine)) | Select-Object -Last 200)
     }
     Save-Status
 }

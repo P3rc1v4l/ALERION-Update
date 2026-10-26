@@ -1068,7 +1068,8 @@ function Get-PnputilPath {
     return (Join-Path $env:WINDIR 'System32\pnputil.exe')
 }
 
-$script:AsusSignerPattern = '(?i)(CN|O)="?(Microsoft Windows Hardware Compatibility Publisher|Microsoft Windows|Microsoft Corporation|ASUSTeK Computer Inc|Realtek Semiconductor Corp|MediaTek Inc|Advanced Micro Devices|Intel Corporation|Qualcomm|ITE Tech|Marvell|Broadcom)'
+# Anchored on both sides: 'CN=Intel Corporation Evil' or 'O=Marvellous Apps' must not pass.
+$script:AsusSignerPattern = '(?i)(^|,\s*)(CN|O)="?(Microsoft Windows Hardware Compatibility Publisher|Microsoft Windows|Microsoft Corporation|ASUSTeK Computer Inc\.?|Realtek Semiconductor Corp\.?|MediaTek Inc\.?|Advanced Micro Devices,? Inc\.?|Intel Corporation|Qualcomm[^,"]*,? Inc\.?|ITE Tech\.? Inc\.?|Marvell[^,"]*,? Inc\.?|Broadcom Inc\.?)"?\s*(,|$)'
 
 function Test-AsusFileSignature {
     <# Authenticode must be Valid and the signer one of the expected vendors / Microsoft WHQL.

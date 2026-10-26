@@ -44,10 +44,12 @@ $src = $PSScriptRoot
 # %TEMP% (a normal process of the same user could swap files there between compile and load).
 $appRootDir = Split-Path $PSScriptRoot -Parent
 if ($appRootDir -like "$env:ProgramFiles\*" -and ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    if (-not $env:UPDATECENTER_USERTEMP) { $env:UPDATECENTER_USERTEMP = $env:TEMP }   # Cleanup still cleans the user's temp folder
     $privTemp = Join-Path $appRootDir 'tmp'
     if (-not (Test-Path $privTemp)) { New-Item -ItemType Directory -Path $privTemp -Force | Out-Null }
     $env:TEMP = $privTemp; $env:TMP = $privTemp
-}Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
+}
+Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Providers.psm1') -DisableNameChecking -Force
 
 if ($BackgroundCheck) { $Scan = [switch]$true; $Silent = [switch]$true }
@@ -68,6 +70,12 @@ $runLock = $null
 while (-not $runLock) {
     try { $runLock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
     catch {
+        # only a sharing violation means "another run holds it"; anything else (no rights, disk) is a real error
+        $hr = $_.Exception.InnerException.HResult -band 0xFFFF
+        if ($_.Exception.InnerException -isnot [IO.IOException] -or $hr -notin 32, 33) {
+            [Console]::Error.WriteLine("Update Center cannot use its state folder ($stateDir): $($_.Exception.InnerException.Message)")
+            exit 1
+        }
         if ((Get-Date) -ge $lockWait) {
             try { Write-Log -Level WARN -Message 'Another Update Center run is active - this run was skipped' } catch { }
             exit 3
@@ -189,9 +197,11 @@ try {
         Import-Module (Join-Path $src 'Cleanup.psm1') -DisableNameChecking -Force
         Write-Log -Message ("Scheduled cleanup: {0}" -f (@($config.CleanupIds) -join ', '))
         $freed = 0L
-        foreach ($r in @(Invoke-Cleanup -Ids @($config.CleanupIds))) {
-            $freed += [long]$r.Freed
-            Write-Log -Message ("cleanup {0}: {1} ({2} bytes) {3}" -f $r.Id, $r.Status, $r.Freed, $r.Message)
+        $ids = @($config.CleanupIds | Where-Object { $_ })
+        if (-not $ids.Count) { Write-Log -Message 'Scheduled cleanup: no areas selected - nothing to do' }
+        foreach ($r in @(if ($ids.Count) { Invoke-Cleanup -Ids $ids })) {
+            $freed += [long]$r.FreedBytes
+            Write-Log -Message ("cleanup {0}: {1} ({2} bytes) {3}" -f $r.Id, $r.Status, $r.FreedBytes, $r.Message)
         }
         Write-Log -Level OK -Message ("Scheduled cleanup finished, {0:N0} MB freed" -f ($freed / 1MB))
         if ($freed -ge 50MB) { Show-Toast -Title (T 'toast.cleanupDone' @(('{0:N1} GB' -f ($freed / 1GB)))) -Body (T 'toast.cleanupBody') }
@@ -316,7 +326,12 @@ try {
     $nAvail = @($available | Where-Object { -not $_.IsCheck }).Count
     Step 'scan' 18 ("{0} update(s) available" -f $nAvail) -Key 'eng.found' -KeyArgs @($nAvail)
     $scanItems = @($candidates.ToArray()) + @($results | Where-Object { $_.Status -eq 'Failed' })
-    Write-AtomicFile -Path (Join-Path (Get-AppPaths).StateDir 'last-scan.json') -Content (([pscustomobject]@{
+    # Only a GUI scan reads the installed programs; other runs keep the last known list for the search.
+    $scanFile = Join-Path (Get-AppPaths).StateDir 'last-scan.json'
+    if (-not $Scan -and (Test-Path $scanFile)) {
+        try { $prevScan = Get-Content $scanFile -Raw -Encoding UTF8 | ConvertFrom-Json; if ($prevScan.PSObject.Properties['Installed']) { $installed = @($prevScan.Installed | ForEach-Object { $_ }) } } catch { }
+    }
+    Write-AtomicFile -Path $scanFile -Content (([pscustomobject]@{
         ScannedAt = (Get-Date).ToString('o'); Items = $scanItems; Installed = $installed
     }) | ConvertTo-Json -Depth 5)
 
@@ -492,7 +507,9 @@ try {
     }
 }
 catch [System.OperationCanceledException] {
-    Write-Log -Level WARN -Message "Run cancelled: $($_.Exception.Message)"
+    # also used to leave the cleanup-only and self-update-only paths early: those are no warnings
+    $why = $_.Exception.Message
+    Write-Log -Level $(if ($why -in 'cleanup only', 'self-update only') { 'INFO' } else { 'WARN' }) -Message "Run ended: $why"
 }
 catch {
     $exitCode = 1

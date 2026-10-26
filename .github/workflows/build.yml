@@ -33,6 +33,18 @@ jobs:
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\signing_test.ps1
 
+      - name: Module tests (Windows PowerShell 5.1, dry runs only)
+        shell: powershell
+        run: |
+          $env:UPDATECENTER_DATADIR = Join-Path $env:RUNNER_TEMP 'uc-data'
+          $failed = @()
+          foreach ($t in 'cleanup_test', 'securityscan_test', 'startup_test', 'uninstaller_test', 'vendorupdates_test') {
+            Write-Host "== $t"
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File "tests\$t.ps1"
+            if ($LASTEXITCODE -ne 0) { $failed += $t }
+          }
+          if ($failed) { throw "Module tests failed: $($failed -join ', ')" }
+
       - name: Lint (PSScriptAnalyzer, errors only)
         shell: powershell
         run: |

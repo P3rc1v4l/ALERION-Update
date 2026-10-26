@@ -17,10 +17,11 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit 0
 }
 
-$targets = @((Join-Path $env:ProgramFiles 'Update Center'), (Join-Path $env:ProgramFiles 'ALERION Update'), (Join-Path $env:ProgramFiles 'UpdateCenter-Update'))
+$targets = @((Join-Path $env:ProgramFiles 'Update Center'), (Join-Path $env:ProgramFiles 'ALERION Update'), (Join-Path $env:ProgramFiles 'UpdateCenter-Update'),
+             (Join-Path $env:ProgramFiles 'Update Center.bak'))
 # Stop the app and any running update first, otherwise its files cannot be deleted.
 Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $cl = $_.CommandLine; $cl -and $_.ProcessId -ne $PID -and @($targets | Where-Object { $cl -like "*$_\src\*" }).Count } |
+    Where-Object { $cl = $_.CommandLine; $cl -and $_.ProcessId -ne $PID -and @($targets | Where-Object { $cl -like "*$_\*" }).Count } |   # app, engine and a waiting self-update installer
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 1
 foreach ($tp in @('\UpdateCenter\', '\ALERION\')) {
