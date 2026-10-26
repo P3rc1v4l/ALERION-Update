@@ -12,6 +12,51 @@ $script:UninstallTimeoutMinutes = 30
 $script:MaxLeftoverBytes = [int64]2GB
 
 # =====================================================================================
+# Progress helpers
+# Contract: the caller passes a synchronized hashtable. We write Percent (0..100, -1 = indeterminate), Text, CanCancel,
+# CanPause, Phase; we read Cancel and Pause. $null = no progress, behave as before.
+# =====================================================================================
+
+function Set-Prog {
+    param($Progress, $Percent = $null, $Text = $null, $CanCancel = $null, $CanPause = $null, $Phase = $null)
+    if ($null -eq $Progress) { return }
+    try {
+        if ($null -ne $Percent) { $Progress['Percent'] = [double]$Percent }
+        if ($null -ne $Text) { $Progress['Text'] = [string]$Text }
+        if ($null -ne $CanCancel) { $Progress['CanCancel'] = [bool]$CanCancel }
+        if ($null -ne $CanPause) { $Progress['CanPause'] = [bool]$CanPause }
+        if ($null -ne $Phase) { $Progress['Phase'] = [string]$Phase }
+    } catch { }
+}
+
+function Test-ProgCancel {
+    param($Progress)
+    if ($null -eq $Progress) { return $false }
+    return ($Progress['Cancel'] -eq $true)
+}
+
+function Wait-ProgPause {
+    <# Safe point: blocks while Pause is set (and pausing is currently allowed), keeps watching Cancel.
+       Returns $true when cancellation was requested. #>
+    param($Progress)
+    if ($null -eq $Progress) { return $false }
+    if ($Progress['Cancel'] -eq $true) { return $true }
+    if ($Progress['Pause'] -eq $true -and $Progress['CanPause'] -eq $true) {
+        $prev = $Progress['Text']
+        Set-Prog $Progress -Text (T 'prog.paused')
+        while ($Progress['Pause'] -eq $true -and $Progress['Cancel'] -ne $true) { Start-Sleep -Milliseconds 300 }
+        if ($Progress['Cancel'] -eq $true) { return $true }
+        if ($null -ne $prev) { Set-Prog $Progress -Text $prev }
+    }
+    return $false
+}
+
+function Format-Elapsed {
+    param([TimeSpan]$Span)
+    return ('{0:00}:{1:00}' -f [int][Math]::Floor($Span.TotalMinutes), $Span.Seconds)
+}
+
+# =====================================================================================
 # Small helpers
 # =====================================================================================
 
@@ -138,6 +183,7 @@ function ConvertTo-AppRecord {
 }
 
 function Get-RegistryApps {
+    param($Progress = $null, [double]$PctFrom = 0, [double]$PctTo = 100)
     $roots = @(
         @{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'; Scope = 'machine' },
         @{ Path = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'; Scope = 'machine' },
@@ -145,9 +191,16 @@ function Get-RegistryApps {
         @{ Path = 'HKCU:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'; Scope = 'user' }
     )
     $list = New-Object System.Collections.Generic.List[object]
+    $ri = 0; $stop = $false
     foreach ($root in $roots) {
+        if ($stop -or ($Progress -and (Wait-ProgPause $Progress))) { break }
+        Set-Prog $Progress -Percent ($PctFrom + ($PctTo - $PctFrom) * $ri / $roots.Count) -Text (T 'prog.listRegistry')
+        $ri++
         if (-not (Test-Path -LiteralPath $root.Path)) { continue }
+        $kc = 0
         foreach ($k in @(Get-ChildItem -LiteralPath $root.Path -ErrorAction SilentlyContinue)) {
+            $kc++
+            if ($Progress -and ($kc % 25) -eq 0 -and (Wait-ProgPause $Progress)) { $stop = $true; break }
             try { $props = Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction Stop } catch { continue }
             $name = ([string](Get-Prop $props 'DisplayName' '')).Trim()
             if (-not $name) { continue }
@@ -212,11 +265,18 @@ function Get-AppxManifestText {
 }
 
 function Get-StoreApps {
+    param($Progress = $null, [double]$PctFrom = 0, [double]$PctTo = 100)
     $list = New-Object System.Collections.Generic.List[object]
     $pkgs = @()
     try { $pkgs = @(Get-AppxPackage -ErrorAction Stop) } catch { Write-Log -Level WARN -Message "Get-AppxPackage failed: $($_.Exception.Message)"; return @() }
     $startMap = Get-StoreStartMap
+    $pi = 0
     foreach ($p in $pkgs) {
+        $pi++
+        if ($Progress) {
+            if (Wait-ProgPause $Progress) { break }
+            if (($pi % 5) -eq 0) { Set-Prog $Progress -Percent ($PctFrom + ($PctTo - $PctFrom) * $pi / [Math]::Max(1, $pkgs.Count)) -Text (T 'prog.listStore') }
+        }
         if ([bool](Get-Prop $p 'IsResourcePackage' $false)) { continue }
         $raw = [string]$p.Name
         $reason = ''
@@ -264,10 +324,19 @@ function Add-WingetIds {
 function Get-InstalledApps {
     <# All uninstallable-looking programs. Protected entries are returned too (Protected=$true) so the GUI can
        show them greyed out - they can never be uninstalled through Invoke-AppUninstall. #>
-    param([switch]$SkipWinget)
+    param([switch]$SkipWinget, [hashtable]$Progress = $null, [double]$PctFrom = 0, [double]$PctTo = 100)
     $all = New-Object System.Collections.Generic.List[object]
     $seen = @{}
-    foreach ($a in (@(Get-RegistryApps) + @(Get-StoreApps))) {
+    # Sources: registry (40 %), Store (45 %), winget ids (15 %; one external call, cannot be interrupted).
+    $span = $PctTo - $PctFrom
+    $wingetShare = if ($SkipWinget) { 0.0 } else { 0.15 }
+    $regEnd = $PctFrom + $span * 0.40 * (1.0 - $wingetShare) / 0.85
+    $storeEnd = $PctFrom + $span * (1.0 - $wingetShare)
+    Set-Prog $Progress -Percent $PctFrom -Text (T 'prog.listRegistry') -CanCancel $true -CanPause $true -Phase 'scan'
+    $regApps = @(Get-RegistryApps -Progress $Progress -PctFrom $PctFrom -PctTo $regEnd)
+    $storeApps = @()
+    if (-not (Test-ProgCancel $Progress)) { $storeApps = @(Get-StoreApps -Progress $Progress -PctFrom $regEnd -PctTo $storeEnd) }
+    foreach ($a in ($regApps + $storeApps)) {
         # 32/64-bit duplicates and user/machine duplicates: first one wins (64-bit machine is listed first).
         $id = ('{0}|{1}|{2}' -f $a.Name, $a.Version, $a.Publisher).ToLowerInvariant()
         if ($a.Source -ne 'store' -and $seen.ContainsKey($id)) { continue }
@@ -275,7 +344,16 @@ function Get-InstalledApps {
         $all.Add($a)
     }
     $arr = $all.ToArray()
-    if (-not $SkipWinget) { Add-WingetIds -Apps $arr }
+    if ($Progress -and (Test-ProgCancel $Progress)) {
+        Set-Prog $Progress -Text (T 'prog.cancelled') -CanCancel $false -CanPause $false
+        return @($arr | Sort-Object Name)   # partial list: caller knows it cancelled
+    }
+    if (-not $SkipWinget) {
+        Set-Prog $Progress -Percent $storeEnd -Text (T 'prog.listWinget') -CanCancel $false -CanPause $false
+        Add-WingetIds -Apps $arr
+    }
+    Set-Prog $Progress -Percent $PctTo
+    if ($PctTo -ge 100) { Set-Prog $Progress -Text (T 'prog.done') -CanCancel $false -CanPause $false }
     return @($arr | Sort-Object Name)
 }
 
@@ -319,7 +397,7 @@ function Test-SafeUninstallExe {
 function Start-UninstallProcess {
     <# Starts the uninstaller with a raw argument string (no re-quoting) and waits with a timeout.
        Output is not captured: vendor wizards must be free to show a window and cannot deadlock on a pipe. #>
-    param([Parameter(Mandatory)][string]$Exe, [string]$Arguments = '', [switch]$Hidden, [int]$TimeoutMinutes = 30)
+    param([Parameter(Mandatory)][string]$Exe, [string]$Arguments = '', [switch]$Hidden, [int]$TimeoutMinutes = 30, $Progress = $null, [string]$Label = '')
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Exe
     $psi.Arguments = $Arguments
@@ -335,7 +413,18 @@ function Start-UninstallProcess {
         $psi.UseShellExecute = $true; $psi.Verb = 'runas'; $psi.CreateNoWindow = $false
         $p = [System.Diagnostics.Process]::Start($psi)
     }
-    if ($p.WaitForExit($TimeoutMinutes * 60 * 1000)) {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $limitMs = $TimeoutMinutes * 60 * 1000
+    $done = $false
+    if ($Progress) {
+        # Report elapsed time once a second while the vendor uninstaller runs (it cannot be cancelled safely).
+        while (-not ($done = $p.WaitForExit(1000)) -and $clock.ElapsedMilliseconds -lt $limitMs) {
+            Set-Prog $Progress -Text (T 'prog.uninstallingElapsed' @($Label, (Format-Elapsed $clock.Elapsed)))
+        }
+    } else {
+        $done = $p.WaitForExit($limitMs)
+    }
+    if ($done) {
         $p.WaitForExit()
         return [pscustomobject]@{ ExitCode = $p.ExitCode; TimedOut = $false }
     }
@@ -396,7 +485,7 @@ function Get-UninstallPlan {
 function Invoke-AppUninstall {
     <# Removes one app. Protected apps are always refused. The result is verified against the registry / package
        list afterwards. The vendor's own uninstaller may show its wizard (UninstallString fallback). #>
-    param([Parameter(Mandatory)]$App, [switch]$DryRun)
+    param([Parameter(Mandatory)]$App, [switch]$DryRun, [hashtable]$Progress = $null, [switch]$RestorePoint)
     $name = [string](Get-Prop $App 'Name' '')
     if ([bool](Get-Prop $App 'Protected' $false)) {
         return New-UninstallResult -App $App -Status 'Skipped' -Message ('protected:' + (Get-Prop $App 'ProtectedReason' 'unknown'))
@@ -423,7 +512,26 @@ function Invoke-AppUninstall {
     $reboot = $false
     $last = ''
     $lastCode = $null
+    $stepNo = 0
+    # Phases: restorepoint (optional, cancel allowed) -> uninstall (vendor uninstaller: not cancellable) -> verify -> done.
+    if ($Progress) {
+        Set-Prog $Progress -Percent 0 -CanCancel $true -CanPause $false -Phase 'restorepoint' -Text (T 'prog.startUninstall' @($name))
+        if (Test-ProgCancel $Progress) { return New-UninstallResult -App $App -Status 'Cancelled' -Message 'prog.cancelled' }
+    }
+    if ($RestorePoint) {
+        Set-Prog $Progress -Percent -1 -Phase 'restorepoint' -Text (T 'prog.restorepoint')
+        try { [void](New-RestorePoint) } catch { Write-Log -Level WARN -Message "Restore point failed: $($_.Exception.Message)" }
+        # Checkpoint-Computer itself cannot be interrupted; a cancel that arrived meanwhile stops before the uninstall.
+        if (Test-ProgCancel $Progress) { return New-UninstallResult -App $App -Status 'Cancelled' -Message 'prog.cancelled' }
+    }
     foreach ($step in $plan) {
+        if ($stepNo -gt 0 -and $Progress) {
+            # Between fallback methods nothing is running: cancelling is safe again.
+            Set-Prog $Progress -CanCancel $true -Phase 'uninstall' -Text (T 'prog.nextMethod' @($name))
+            if (Test-ProgCancel $Progress) { return New-UninstallResult -App $App -Status 'Cancelled' -ExitCode $lastCode -Message 'prog.cancelled' -RebootRequired $reboot }
+        }
+        $stepNo++
+        Set-Prog $Progress -Percent -1 -CanCancel $false -CanPause $false -Phase 'uninstall' -Text (T 'prog.uninstalling' @($name))
         Write-Log -Message "Uninstall '$name' via $($step.Text)"
         $code = $null
         $note = ''
@@ -437,14 +545,14 @@ function Invoke-AppUninstall {
                 }
                 'msi' {
                     $msi = Join-Path $env:SystemRoot 'System32\msiexec.exe'
-                    $r = Start-UninstallProcess -Exe $msi -Arguments ('/x ' + $step.Value + ' /qn /norestart') -Hidden -TimeoutMinutes $script:UninstallTimeoutMinutes
+                    $r = Start-UninstallProcess -Exe $msi -Arguments ('/x ' + $step.Value + ' /qn /norestart') -Hidden -TimeoutMinutes $script:UninstallTimeoutMinutes -Progress $Progress -Label $name
                     $code = $r.ExitCode; if ($r.TimedOut) { return New-UninstallResult -App $App -Status 'Failed' -ExitCode $code -Message 'timeout' }
                 }
                 { $_ -in 'quiet', 'string' } {
                     $cl = Split-CommandLine -Command $step.Value
                     if (-not (Test-SafeUninstallExe -Exe $cl.Exe)) { $last = 'unsafe-or-missing-uninstaller'; continue }
                     $hidden = ($step.Type -eq 'quiet')
-                    $r = Start-UninstallProcess -Exe $cl.Exe -Arguments $cl.Args -Hidden:$hidden -TimeoutMinutes $script:UninstallTimeoutMinutes
+                    $r = Start-UninstallProcess -Exe $cl.Exe -Arguments $cl.Args -Hidden:$hidden -TimeoutMinutes $script:UninstallTimeoutMinutes -Progress $Progress -Label $name
                     $code = $r.ExitCode; if ($r.TimedOut) { return New-UninstallResult -App $App -Status 'Failed' -ExitCode $code -Message 'timeout' }
                     if ($step.Type -eq 'string') { $note = ' (vendor uninstaller, may have shown its own window)' }
                 }
@@ -462,8 +570,10 @@ function Invoke-AppUninstall {
         $lastCode = $code
         $info = ConvertTo-ExitInfo -Code ([int]$code)
         if ($info.Reboot) { $reboot = $true }
+        Set-Prog $Progress -Percent -1 -CanCancel $false -CanPause $false -Phase 'verify' -Text (T 'prog.verifying' @($name))
         if (Wait-AppGone -App $App) {
             Write-Log -Level OK -Message "Uninstalled '$name' via $($step.Type) (exit $code)"
+            Set-Prog $Progress -Percent 100 -Text (T 'prog.done')
             return New-UninstallResult -App $App -Status 'Removed' -ExitCode $code -Message ("via $($step.Text)$note") -RebootRequired $reboot
         }
         $last = if ($info.Ok) { 'still-installed' } else { "exit-code-$code ($($step.Type))" }
@@ -471,6 +581,7 @@ function Invoke-AppUninstall {
         if ([int]$code -in @(1602, 1223)) { $last = 'cancelled'; break }
     }
     Write-Log -Level ERROR -Message "Uninstall of '$name' failed: $last"
+    Set-Prog $Progress -Percent 100 -CanCancel $false -CanPause $false -Text (T 'prog.done')
     return New-UninstallResult -App $App -Status 'Failed' -ExitCode $lastCode -Message $(if ($last) { $last } else { 'no-usable-method' }) -RebootRequired $reboot
 }
 
@@ -608,14 +719,21 @@ function Get-ShortcutTarget {
 function Find-AppLeftovers {
     <# Conservative leftover search. Only call after the uninstall. Items with Safe=$false are shown for information
        only and are never removed by Remove-AppLeftovers. #>
-    param([Parameter(Mandatory)]$App, [object[]]$InstalledApps)
+    param([Parameter(Mandatory)]$App, [object[]]$InstalledApps, [hashtable]$Progress = $null)
     $name = ([string](Get-Prop $App 'Name' '')).Trim()
     $publisher = ([string](Get-Prop $App 'Publisher' '')).Trim()
     $key = [string](Get-Prop $App 'Key' '')
     $items = New-Object System.Collections.Generic.List[object]
     if (-not $name) { return @() }
 
-    if ($null -eq $InstalledApps) { $InstalledApps = @(Get-InstalledApps -SkipWinget) }
+    # With progress: listing the installed apps takes the first 30 %, the search itself the rest (percent by roots scanned).
+    $cancelled = $false
+    Set-Prog $Progress -Percent 0 -Text (T 'prog.leftoverSearch') -CanCancel $true -CanPause $true -Phase 'leftovers'
+    if ($null -eq $InstalledApps) {
+        $InstalledApps = @(Get-InstalledApps -SkipWinget -Progress $Progress -PctFrom 0 -PctTo 30)
+        Set-Prog $Progress -CanCancel $true -CanPause $true -Phase 'leftovers'
+    } else { Set-Prog $Progress -Percent 30 }
+    if (Test-ProgCancel $Progress) { Set-Prog $Progress -Text (T 'prog.cancelled'); return @() }
     $others = @($InstalledApps | Where-Object { $_.Key -ne $key })
     $otherLocs = @($others | ForEach-Object { ConvertTo-NormalPath ([string](Get-Prop $_ 'InstallLocation' '')) } | Where-Object { $_ })
     $svcPaths = @()
@@ -636,17 +754,36 @@ function Find-AppLeftovers {
         $items.Add([pscustomobject]@{ Type = 'Folder'; Path = $p; SizeMB = $risk.SizeMB; Safe = (-not $risk.Risk); Reason = $(if ($risk.Risk) { $risk.Risk } else { $OkReason }) })
     }
 
-    $loc = ConvertTo-NormalPath ([string](Get-Prop $App 'InstallLocation' ''))
-    if ($loc) { & $addFolder $loc 'install-location' }
+    $knownRoots = @(Get-KnownRoots)
+    $regKeys = @()
+    if ($publisher) { $regKeys = @("HKCU:\Software\$publisher\$name", "HKLM:\SOFTWARE\$publisher\$name", "HKLM:\SOFTWARE\WOW6432Node\$publisher\$name") }
+    $menus = @((Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'), (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'))
+    $stepTotal = 1 + $knownRoots.Count + $regKeys.Count + $menus.Count
+    $st = @{ Done = 0 }
+    # Safe point + percent per scanned root; returns $true when cancelled.
+    $step = {
+        param([string]$What)
+        if (Wait-ProgPause $Progress) { return $true }
+        Set-Prog $Progress -Percent (30.0 + 70.0 * $st.Done / $stepTotal) -Text (T 'prog.leftoverScan' @($What))
+        $st.Done++
+        return $false
+    }
 
-    foreach ($root in (Get-KnownRoots)) {
+    $loc = ConvertTo-NormalPath ([string](Get-Prop $App 'InstallLocation' ''))
+    if ($Progress) { $cancelled = [bool](& $step 'install') }
+    if (-not $cancelled -and $loc) { & $addFolder $loc 'install-location' }
+
+    foreach ($root in $knownRoots) {
+        if ($cancelled) { break }
+        if ($Progress) { $cancelled = [bool](& $step $root); if ($cancelled) { break } }
         & $addFolder (Join-Path $root $safeName) 'app-folder'
         if ($safePub) { & $addFolder (Join-Path (Join-Path $root $safePub) $safeName) 'vendor-app-folder' }
     }
 
     # Registry: Software\Publisher\AppName only (needs a publisher; the vendor key itself is never offered).
-    if ($publisher) {
-        foreach ($rk in @("HKCU:\Software\$publisher\$name", "HKLM:\SOFTWARE\$publisher\$name", "HKLM:\SOFTWARE\WOW6432Node\$publisher\$name")) {
+    if ($publisher -and -not $cancelled) {
+        foreach ($rk in $regKeys) {
+            if ($Progress) { $cancelled = [bool](& $step 'registry'); if ($cancelled) { break } }
             if ($rk -match '[\*\?\[\]]') { continue }
             if (-not (Test-Path -LiteralPath $rk)) { continue }
             $why = Test-ProtectedRegistryPath -Path $rk
@@ -656,8 +793,8 @@ function Find-AppLeftovers {
     }
 
     # Start menu shortcuts of this app whose target no longer exists.
-    $menus = @((Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'), (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'))
-    foreach ($menu in $menus) {
+    foreach ($menu in $(if ($cancelled) { @() } else { $menus })) {
+        if ($Progress) { $cancelled = [bool](& $step 'shortcuts'); if ($cancelled) { break } }
         if (-not (Test-Path -LiteralPath $menu)) { continue }
         $lnks = @(Get-ChildItem -LiteralPath $menu -Filter '*.lnk' -File -ErrorAction SilentlyContinue)
         $dirs = @(Get-ChildItem -LiteralPath $menu -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq $safeName })
@@ -670,6 +807,10 @@ function Find-AppLeftovers {
             if (Test-Path -LiteralPath $target) { continue }
             $items.Add([pscustomobject]@{ Type = 'Shortcut'; Path = $l.FullName; SizeMB = 0.0; Safe = $true; Reason = 'broken-shortcut' })
         }
+    }
+    if ($Progress) {
+        Set-Prog $Progress -CanCancel $false -CanPause $false
+        if ($cancelled) { Set-Prog $Progress -Text (T 'prog.cancelled') } else { Set-Prog $Progress -Percent 100 -Text (T 'prog.done') }
     }
     return @($items.ToArray())
 }
@@ -701,10 +842,17 @@ function Export-RegistryBackup {
 function Remove-AppLeftovers {
     <# Deletes only items flagged Safe=$true, and re-checks every path against the hard block list first.
        Folders and shortcuts go to the Recycle Bin (undo possible); registry keys are exported before deletion. #>
-    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items, [switch]$DryRun)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items, [switch]$DryRun, [hashtable]$Progress = $null)
     $results = New-Object System.Collections.Generic.List[object]
+    $all = @($Items | Where-Object { $null -ne $_ })
+    $idx = 0; $cancelled = $false
+    Set-Prog $Progress -Percent 0 -Text (T 'prog.leftoverRemove' @(0, $all.Count)) -CanCancel $true -CanPause $true -Phase 'leftovers'
     foreach ($item in @($Items)) {
         if ($null -eq $item) { continue }
+        if ($Progress -and -not $cancelled -and (Wait-ProgPause $Progress)) { $cancelled = $true }
+        if ($cancelled) { $results.Add((New-LeftoverResult $item 'Cancelled' 'prog.cancelled')); continue }
+        $idx++
+        Set-Prog $Progress -Percent (100.0 * ($idx - 1) / [Math]::Max(1, $all.Count)) -Text (T 'prog.leftoverRemove' @($idx, $all.Count))
         $type = [string](Get-Prop $item 'Type' '')
         $path = [string](Get-Prop $item 'Path' '')
         if ((Get-Prop $item 'Safe' $false) -ne $true) { $results.Add((New-LeftoverResult $item 'Skipped' 'not-safe')); continue }
@@ -750,6 +898,10 @@ function Remove-AppLeftovers {
             Write-Log -Level WARN -Message "Leftover removal failed for ${path}: $($_.Exception.Message)"
             $results.Add((New-LeftoverResult $item 'Failed' $_.Exception.Message))
         }
+    }
+    if ($Progress) {
+        Set-Prog $Progress -CanCancel $false -CanPause $false
+        if ($cancelled) { Set-Prog $Progress -Text (T 'prog.cancelled') } else { Set-Prog $Progress -Percent 100 -Text (T 'prog.done') }
     }
     return @($results.ToArray())
 }

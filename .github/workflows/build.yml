@@ -24,6 +24,10 @@ jobs:
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\smoke_test.ps1
 
+      - name: Signing test (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\signing_test.ps1
+
       - name: Lint (PSScriptAnalyzer, errors only)
         shell: powershell
         run: |
@@ -33,14 +37,114 @@ jobs:
           $issues | Format-Table -AutoSize
           if ($issues) { throw "PSScriptAnalyzer found $($issues.Count) error(s)" }
 
+      # ---- Packaging with optional code signing -------------------------------------------------
+      # Signing is optional (see docs/CODE_SIGNING.md). Without signing secrets the build stays unsigned.
+      - name: Stage package and detect signing mode
+        if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'
+        id: stage
+        shell: powershell
+        env:
+          HAS_PFX: ${{ secrets.SIGN_PFX_BASE64 != '' && secrets.SIGN_PFX_PASSWORD != '' }}
+          HAS_TS: ${{ secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_CLIENT_SECRET != '' && vars.TS_ENDPOINT != '' && vars.TS_ACCOUNT != '' && vars.TS_PROFILE != '' }}
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $stage = Join-Path $env:RUNNER_TEMP 'pkg'
+          $tmpZip = Join-Path $env:RUNNER_TEMP 'raw.zip'
+          git archive --format=zip -o $tmpZip HEAD
+          Expand-Archive -Path $tmpZip -DestinationPath $stage -Force
+          Remove-Item $tmpZip
+          $mode = 'none'
+          if ($env:HAS_PFX -eq 'true') { $mode = 'pfx' } elseif ($env:HAS_TS -eq 'true') { $mode = 'ts' }
+          if ($mode -eq 'none') { Write-Host '::notice::No signing secrets configured - building an UNSIGNED package (see docs/CODE_SIGNING.md).' }
+          else { Write-Host "Signing mode: $mode" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "mode=$mode" >> $env:GITHUB_OUTPUT
+          "stage=$stage" >> $env:GITHUB_OUTPUT
+
+      - name: Sign package (PFX certificate)
+        if: steps.stage.outputs.mode == 'pfx'
+        shell: powershell
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+          STAGE: ${{ steps.stage.outputs.stage }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+            & .\tools\sign.ps1 -Root $env:STAGE -PfxPath $pfx | Out-Null
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Sign scripts (Azure Trusted Signing)
+        if: steps.stage.outputs.mode == 'ts'
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.TS_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.TS_ACCOUNT }}
+          certificate-profile-name: ${{ vars.TS_PROFILE }}
+          files-folder: ${{ steps.stage.outputs.stage }}
+          files-folder-filter: ps1,psm1
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Create file catalog (Azure Trusted Signing)
+        if: steps.stage.outputs.mode == 'ts'
+        shell: powershell
+        env:
+          STAGE: ${{ steps.stage.outputs.stage }}
+        run: |
+          # The catalog must be created AFTER the scripts were signed (their hashes changed).
+          $dir = Join-Path $env:RUNNER_TEMP 'catsign'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          New-FileCatalog -Path $env:STAGE -CatalogFilePath (Join-Path $dir 'UpdateCenter.cat') -CatalogVersion 2 | Out-Null
+
+      - name: Sign file catalog (Azure Trusted Signing)
+        if: steps.stage.outputs.mode == 'ts'
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.TS_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.TS_ACCOUNT }}
+          certificate-profile-name: ${{ vars.TS_PROFILE }}
+          files-folder: ${{ runner.temp }}\catsign
+          files-folder-filter: cat
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
       - name: Package (ZIP + SHA-256 + Setup.exe)
         if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'
         id: pkg
         shell: powershell
+        env:
+          STAGE: ${{ steps.stage.outputs.stage }}
+          VERSION: ${{ steps.stage.outputs.version }}
+          MODE: ${{ steps.stage.outputs.mode }}
         run: |
-          $version = (Get-Content VERSION -Raw).Trim()
+          $version = $env:VERSION
+          $stage = $env:STAGE
+          if ($env:MODE -eq 'ts') {
+            Move-Item (Join-Path $env:RUNNER_TEMP 'catsign\UpdateCenter.cat') (Join-Path $stage 'UpdateCenter.cat') -Force
+          }
+          if (Test-Path (Join-Path $stage 'UpdateCenter.cat')) {
+            Import-Module (Join-Path $stage 'src\Signing.psm1') -Force
+            $s = Get-PackageSignature -Root $stage
+            Write-Host ("Package signature: signed={0} valid={1} status={2} signer={3} catalogOk={4}" -f $s.Signed, $s.Valid, $s.Status, $s.Subject, $s.CatalogOk)
+            if (-not $s.CatalogOk -or -not $s.Valid) { throw "Signed package failed verification: $($s.Mismatches -join '; ')" }
+          }
           $zip = "UpdateCenter-v$version.zip"
-          git archive --format=zip -o $zip HEAD
+          # .NET zip writer (forward slashes in entry names); Compress-Archive in 5.1 uses backslashes.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [IO.Compression.ZipFile]::CreateFromDirectory($stage, (Join-Path (Get-Location) $zip), [IO.Compression.CompressionLevel]::Optimal, $false)
           (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip" | Out-File "$zip.sha256" -Encoding ascii
           # Same package under the v1.x name so "ALERION Update" installations can self-update.
           $legacy = "ALERION-Update-v$version.zip"
@@ -48,6 +152,37 @@ jobs:
           (Get-FileHash $legacy -Algorithm SHA256).Hash.ToLower() + "  $legacy" | Out-File "$legacy.sha256" -Encoding ascii
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\build-setup.ps1 -Zip (Resolve-Path $zip)
           "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Sign Setup.exe (PFX certificate)
+        if: steps.stage.outputs.mode == 'pfx' && github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'
+        shell: powershell
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+            & .\tools\sign.ps1 -FilesOnly -PfxPath $pfx -ExtraFiles "UpdateCenter-Setup-v$($env:VERSION).exe" | Out-Null
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Sign Setup.exe (Azure Trusted Signing)
+        if: steps.stage.outputs.mode == 'ts' && github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.TS_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.TS_ACCOUNT }}
+          certificate-profile-name: ${{ vars.TS_PROFILE }}
+          files: ${{ github.workspace }}\UpdateCenter-Setup-v${{ steps.pkg.outputs.version }}.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - name: Publish GitHub release
         if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'

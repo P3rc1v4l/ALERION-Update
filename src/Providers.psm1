@@ -55,8 +55,18 @@ function Test-MajorJump {
     return ([long]$b.Groups[1].Value -gt [long]$a.Groups[1].Value)
 }
 
+# Per-package priorities chosen by the user (config PriorityOverrides: id -> priority).
+$script:PriorityOverrides = @{}
+
+function Set-PriorityOverrides {
+    param($Map)
+    $script:PriorityOverrides = @{}
+    if ($Map) { foreach ($p in $Map.PSObject.Properties) { if ([string]$p.Value -in 'Critical', 'Important', 'Normal', 'Optional') { $script:PriorityOverrides[$p.Name] = [string]$p.Value } } }
+}
+
 function Get-UpdatePriority {
     param([Parameter(Mandatory)]$Item, [string[]]$Categories = @(), [string]$Severity = '')
+    if ($Item.Id -and $script:PriorityOverrides.ContainsKey([string]$Item.Id)) { return $script:PriorityOverrides[[string]$Item.Id] }
     switch ($Item.Source) {
         'defender' { return 'Critical' }
         'self'     { return 'Critical' }
@@ -244,10 +254,11 @@ function Get-PackageProcess {
 }
 
 function Invoke-WingetPackageUpgrade {
-    param([Parameter(Mandatory)]$Package, [int]$TimeoutMinutes = 90)
+    param([Parameter(Mandatory)]$Package, [int]$TimeoutMinutes = 90, [switch]$CloseRunning)
     $winget = Get-WingetPath
     $base = @{ Source = 'winget'; Name = $Package.Name; Id = $Package.Id; From = $Package.Version; To = $Package.Available }
-    # A running program usually blocks its own update (e.g. OBS) - skip instead of failing.
+    # A running program usually blocks its own update (e.g. OBS): close it when allowed, else skip.
+    if ($CloseRunning) { [void](Stop-PackageProcess -DisplayName $Package.Name) }
     $running = @(Get-PackageProcess -DisplayName $Package.Name)
     if ($running.Count) {
         Write-Log -Level WARN -Message ("winget {0}: skipped, running ({1})" -f $Package.Id, (($running | ForEach-Object { $_.ProcessName } | Select-Object -Unique) -join ', '))
@@ -281,6 +292,63 @@ function Invoke-WingetPackageUpgrade {
         'TIMEOUT'           { return New-UpdateResult @base -Status Failed -Message 'msg.timeout' }
         default             { return New-UpdateResult @base -Status Failed -Message ("exit 0x{0:X8}" -f $code) }
     }
+}
+
+function Stop-PackageProcess {
+    <# Closes a program before its update: asks politely (WM_CLOSE) and only kills after the grace period.
+       Returns the names of processes that were running. #>
+    param([Parameter(Mandatory)][string]$DisplayName, [int]$GraceSeconds = 15)
+    $procs = @(Get-PackageProcess -DisplayName $DisplayName)
+    if (-not $procs.Count) { return @() }
+    $names = @($procs | ForEach-Object { $_.ProcessName } | Select-Object -Unique)
+    foreach ($p in $procs) { try { if ($p.MainWindowHandle -ne [IntPtr]::Zero) { [void]$p.CloseMainWindow() } } catch { } }
+    $deadline = (Get-Date).AddSeconds($GraceSeconds)
+    while ((Get-Date) -lt $deadline -and @($procs | Where-Object { -not $_.HasExited }).Count) { Start-Sleep -Milliseconds 500 }
+    foreach ($p in $procs) { try { if (-not $p.HasExited) { $p.Kill() } } catch { } }
+    Write-Log -Message ("Closed for update: {0} ({1})" -f $DisplayName, ($names -join ', '))
+    return $names
+}
+
+function Invoke-WingetReinstall {
+    <# For packages installed with another installer technology (winget 0x8A15008E): uninstall the
+       current copy and install the winget version. User data normally stays (only the program is replaced). #>
+    param([Parameter(Mandatory)][string]$Id, [string]$Name = '', [string]$From = '', [switch]$DryRun)
+    $winget = Get-WingetPath
+    $base = @{ Source = 'winget'; Name = $(if ($Name) { $Name } else { $Id }); Id = $Id; From = $From }
+    if (-not $winget) { return New-UpdateResult @base -Status Failed -Message 'msg.wingetMissing' }
+    if ($DryRun) { return New-UpdateResult @base -Status Info -Message 'msg.reinstallDry' }
+    if ($Name) { [void](Stop-PackageProcess -DisplayName $Name) }
+    $common = @('--id', $Id, '--exact', '--silent', '--accept-source-agreements', '--disable-interactivity')
+    Write-Log -Message "winget reinstall $Id"
+    $u = Invoke-Process -FilePath $winget -ArgumentList (@('uninstall') + $common + @('--force')) -TimeoutMinutes 30
+    Write-Log -Message ("winget uninstall {0}: exit {1}" -f $Id, $u.ExitCode)
+    $i = Invoke-Process -FilePath $winget -ArgumentList (@('install') + $common + @('--accept-package-agreements', '--force')) -TimeoutMinutes 60
+    $kind = if ($script:WingetCodes.ContainsKey($i.ExitCode)) { $script:WingetCodes[$i.ExitCode] } else { 'ERROR' }
+    Write-Log -Level $(if ($kind -in 'OK', 'REBOOT') { 'OK' } else { 'WARN' }) -Message ("winget install {0}: exit {1} ({2})" -f $Id, $i.ExitCode, $kind)
+    $to = ''
+    if ($kind -in 'OK', 'REBOOT') {
+        $list = Invoke-Process -FilePath $winget -ArgumentList @('list', '--id', $Id, '--exact', '--accept-source-agreements', '--disable-interactivity') -TimeoutMinutes 5
+        $row = @(ConvertFrom-WingetListTable -Text $list.Output | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
+        if ($row) { $to = [string]$row.Version }
+        return New-UpdateResult @base -To $to -Status Updated -RebootRequired ($kind -eq 'REBOOT') -Message 'msg.reinstalled'
+    }
+    return New-UpdateResult @base -Status Failed -Message ("exit 0x{0:X8}" -f $i.ExitCode)
+}
+
+function Get-WingetReleaseNotesUrl {
+    <# Release notes link of a package (falls back to the homepage). Empty when winget knows none. #>
+    param([Parameter(Mandatory)][string]$Id)
+    $winget = Get-WingetPath
+    if (-not $winget) { return '' }
+    $r = Invoke-Process -FilePath $winget -ArgumentList @('show', '--id', $Id, '--exact', '--accept-source-agreements', '--disable-interactivity') -TimeoutMinutes 2
+    $fallback = ''
+    foreach ($line in ($r.Output -split "`r?`n")) {
+        $m = [regex]::Match($line, '^\s*(Release Notes Url|Versionshinweise-URL|Homepage|Startseite|Publisher Url|Herausgeber-URL)\s*:\s*(https://\S+)\s*$')
+        if (-not $m.Success) { continue }
+        if ($m.Groups[1].Value -match 'Release|Versionshinweise') { return $m.Groups[2].Value }
+        if (-not $fallback) { $fallback = $m.Groups[2].Value }
+    }
+    return $fallback
 }
 
 # =====================================================================================
@@ -423,7 +491,10 @@ function ConvertTo-WUCandidate {
     $item = New-UpdateResult -Source 'windows' -Name ([string]$Update.Title) -Id $(if ($kb) { $kb } else { [string]$Update.Identity.UpdateID }) `
         -To $to -Status Available -Key ('windows|' + $Update.Identity.UpdateID) -RebootRequired ([bool]($Update.InstallationBehavior.RebootBehavior -ne 0))
     if ($isDriver) { $item.Message = 'msg.driver' }
-    return Set-UpdateMeta -Item $item -Categories (Get-WUCategories $Update) -Severity ([string]$Update.MsrcSeverity)
+    $item = Set-UpdateMeta -Item $item -Categories (Get-WUCategories $Update) -Severity ([string]$Update.MsrcSeverity)
+    # "Optional driver updates" in Windows Settings: offered, but Windows itself would not install them.
+    if ($isDriver -and $Update.BrowseOnly -and -not $script:PriorityOverrides.ContainsKey([string]$item.Id)) { $item.Priority = 'Optional'; $item.Message = 'msg.driverOptional' }
+    return $item
 }
 
 function Get-WindowsUpdateCandidates {
@@ -551,14 +622,29 @@ function Update-DefenderSignatures {
 # =====================================================================================
 
 function Start-OfficeUpdate {
+    param([int]$WaitMinutes = 25)
     $c2r = Join-Path $env:CommonProgramFiles 'microsoft shared\ClickToRun\OfficeC2RClient.exe'
     if (-not (Test-Path $c2r)) { return $null }
+    $cfg = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
     $ver = ''
-    try { $ver = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction Stop).VersionToReport } catch { }
+    try { $ver = (Get-ItemProperty $cfg -ErrorAction Stop).VersionToReport } catch { }
     try {
-        # Office updates itself in the background; open Office apps are not force-closed.
+        # Office has its own updater (Click-to-Run). Open Office apps are not force-closed; the update
+        # is then staged and applied when they close.
         Start-Process -FilePath $c2r -ArgumentList '/update user displaylevel=false forceappshutdown=false' -WindowStyle Hidden
-        return New-UpdateResult -Source 'office' -Name 'Microsoft 365 / Office' -Id 'C2R' -From $ver -Status Triggered -Message 'msg.officeBackground'
+        # Follow the updater instead of fire-and-forget: wait until its client processes are gone and
+        # compare the version, so the report can say what really happened.
+        $deadline = (Get-Date).AddMinutes($WaitMinutes)
+        Start-Sleep -Seconds 20
+        while ((Get-Date) -lt $deadline -and @(Get-Process -Name 'OfficeC2RClient' -ErrorAction SilentlyContinue).Count) { Start-Sleep -Seconds 10 }
+        $now = ''
+        try { $now = (Get-ItemProperty $cfg -ErrorAction Stop).VersionToReport } catch { }
+        if ($now -and $ver -and $now -ne $ver) {
+            return New-UpdateResult -Source 'office' -Name 'Microsoft 365 / Office' -Id 'C2R' -From $ver -To $now -Status Updated
+        }
+        $officeOpen = @(Get-Process -Name 'WINWORD', 'EXCEL', 'POWERPNT', 'OUTLOOK', 'ONENOTE', 'MSACCESS', 'MSPUB', 'lync', 'Teams' -ErrorAction SilentlyContinue).Count -gt 0
+        $msg = if ($officeOpen) { 'msg.officeStaged' } else { 'msg.officeBackground' }
+        return New-UpdateResult -Source 'office' -Name 'Microsoft 365 / Office' -Id 'C2R' -From $ver -To $now -Status Triggered -Message $msg
     } catch {
         return New-UpdateResult -Source 'office' -Name 'Microsoft 365 / Office' -From $ver -Status Failed -Message $_.Exception.Message
     }
@@ -593,7 +679,7 @@ function Get-NvidiaLookup {
 }
 
 function Get-NvidiaLatestDriver {
-    param([Parameter(Mandatory)][string]$GpuName)
+    param([Parameter(Mandatory)][string]$GpuName, [switch]$Studio)
     $products = (Get-NvidiaLookup -TypeId 3).LookupValueSearch.LookupValues.LookupValue
     $name = $GpuName.Trim()
     $p = $products | Where-Object { $_.Name -eq $name } | Select-Object -First 1
@@ -603,7 +689,7 @@ function Get-NvidiaLatestDriver {
     $os = (Get-NvidiaLookup -TypeId 4).LookupValueSearch.LookupValues.LookupValue | Where-Object { $_.Name -eq $osName } | Select-Object -First 1
     if (-not $os) { throw "OS '$osName' not found in NVIDIA OS list" }
     $uri = 'https://gfwsl.geforce.com/services_toolkit/services/com/nvidia/services/AjaxDriverService.php' +
-        "?func=DriverManualLookup&psid=$($p.ParentID)&pfid=$($p.Value)&osID=$($os.Value)&languageCode=1033&isWHQL=1&dch=1&upCRD=0&sort1=0&numberOfResults=1"
+        "?func=DriverManualLookup&psid=$($p.ParentID)&pfid=$($p.Value)&osID=$($os.Value)&languageCode=1033&isWHQL=1&dch=1&upCRD=$(if ($Studio) { 1 } else { 0 })&sort1=0&numberOfResults=1"
     $r = Invoke-RestMethod -UseBasicParsing -Uri $uri -TimeoutSec 60
     if (-not $r.IDS -or -not $r.IDS[0].downloadInfo) { throw 'NVIDIA lookup returned no driver' }
     $info = $r.IDS[0].downloadInfo
@@ -613,11 +699,12 @@ function Get-NvidiaLatestDriver {
 }
 
 function Get-NvidiaUpdateInfo {
-    <# Returns $null when no NVIDIA GPU, otherwise current/latest/needsUpdate. #>
+    <# Returns $null when no NVIDIA GPU, otherwise current/latest/needsUpdate. -Studio = Studio driver branch. #>
+    param([switch]$Studio)
     $gpu = Get-NvidiaGpu
     if (-not $gpu) { return $null }
     $current = ConvertTo-NvidiaVersion $gpu.DriverVersion
-    $latest = Get-NvidiaLatestDriver -GpuName $gpu.Name
+    $latest = Get-NvidiaLatestDriver -GpuName $gpu.Name -Studio:$Studio
     [pscustomobject]@{
         GpuName = $gpu.Name; Current = $current; Latest = $latest.Version; Url = $latest.Url; Size = $latest.Size
         NeedsUpdate = ([version]$latest.Version -gt [version]$current)
@@ -662,6 +749,27 @@ function Install-NvidiaDriver {
     }
     if ($r.ExitCode -eq 0) { return New-UpdateResult @base -Status Updated -RebootRequired $true -Message 'msg.activeAfterReboot' }
     return New-UpdateResult @base -Status Failed -Message ("setup exit {0}" -f $r.ExitCode)
+}
+
+function Backup-DisplayDriver {
+    <# Exports the installed graphics driver package (pnputil) before a driver update, so it can be
+       reinstalled via Device Manager -> Update driver -> Browse. Keeps the two newest backups. #>
+    $root = Join-Path (Get-AppPaths).DataDir 'backups\drivers'
+    try {
+        $drv = @(Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceClass='DISPLAY'" -ErrorAction Stop | Where-Object { $_.InfName -match '^oem\d+\.inf$' })
+        if (-not $drv.Count) { return New-UpdateResult -Source 'system' -Name 'msg.driverBackup' -Status Skipped -Message 'msg.driverBackupNone' }
+        $d = $drv[0]
+        $dir = Join-Path $root ('{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmm'), ($d.DriverVersion -replace '[^\d.]', ''))
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $pnputil = Join-Path $env:WINDIR 'System32\pnputil.exe'
+        $r = Invoke-Process -FilePath $pnputil -ArgumentList @('/export-driver', $d.InfName, $dir) -TimeoutMinutes 10
+        if ($r.ExitCode -ne 0) { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue; throw "pnputil exit $($r.ExitCode)" }
+        @(Get-ChildItem $root -Directory | Sort-Object Name -Descending | Select-Object -Skip 2) | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log -Level OK -Message "Display driver $($d.DriverVersion) backed up to $dir"
+        return New-UpdateResult -Source 'system' -Name 'msg.driverBackup' -From ([string]$d.DriverVersion) -Status Updated -Message $dir
+    } catch {
+        return New-UpdateResult -Source 'system' -Name 'msg.driverBackup' -Status Skipped -Message $_.Exception.Message
+    }
 }
 
 # =====================================================================================
@@ -739,6 +847,18 @@ function Invoke-SelfUpdate {
     $root = $versionFile.DirectoryName
     if ((Get-Content $versionFile.FullName -Raw).Trim() -ne $tag) { throw 'Self-update package version does not match release tag' }
     if (-not (Test-Path (Join-Path $root 'src\UpdateEngine.ps1'))) { throw 'Self-update package is incomplete' }
+    # Code signing (trust on first use): once the installed copy is signed, every update must be signed
+    # by the same certificate and match its catalog. The verifier is the INSTALLED module, never the new one.
+    $signingModule = Join-Path $appRoot 'src\Signing.psm1'
+    if (Test-Path $signingModule) {
+        Import-Module $signingModule -Force -DisableNameChecking
+        $trust = Test-UpdatePackageTrust -NewRoot $root -InstalledRoot $appRoot
+        Write-Log -Message ("Self-update signature: {0} {1}" -f $trust.Reason, $trust.Detail)
+        if (-not $trust.Allowed) {
+            Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+            return New-UpdateResult -Source 'self' -Name 'Update Center' -From $current -To $tag -Status Failed -Message $trust.Reason
+        }
+    }
     foreach ($item in @('src', 'assets', 'VERSION', 'Install.ps1', 'Uninstall.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md')) {
         $srcItem = Join-Path $root $item
         $dstItem = Join-Path $appRoot $item

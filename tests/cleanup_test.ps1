@@ -86,6 +86,158 @@ Check 'engine: locked file kept and counted' { (Test-Path $files.locked) -and $r
 Check 'engine: freed bytes sane' { $res.Freed -ge 2000 }
 Check 'engine: empty old subfolder removed, root kept' { -not (Test-Path "$t\sub") -and (Test-Path $t) }
 
+# ---------------------------------------------------------------- progress / cancel / pause
+Write-Host 'Progress, cancel, pause' -ForegroundColor Cyan
+Import-Module (Join-Path $root 'src\Common.psm1') -Force -DisableNameChecking
+$pausedText = T 'prog.paused'
+
+function Start-ModJob {
+    param([string]$Code, [hashtable]$Progress)
+    $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+    $rs.SessionStateProxy.SetVariable('Progress', $Progress)
+    $rs.SessionStateProxy.SetVariable('ModPath', (Join-Path $root 'src\Cleanup.psm1'))
+    $ps = [powershell]::Create(); $ps.Runspace = $rs
+    [void]$ps.AddScript("Import-Module `$ModPath -Force -DisableNameChecking; " + $Code)
+    [pscustomobject]@{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+}
+function Receive-ModJob {
+    param($Job, [int]$TimeoutSec = 60)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $Job.Handle.IsCompleted) {
+        if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) { $Job.PS.Stop(); throw "job timeout after $TimeoutSec s" }
+        Start-Sleep -Milliseconds 20
+    }
+    $out = @($Job.PS.EndInvoke($Job.Handle))
+    if ($Job.PS.Streams.Error.Count -gt 0) { $e = $Job.PS.Streams.Error[0].ToString(); $Job.PS.Dispose(); $Job.RS.Dispose(); throw $e }
+    $Job.PS.Dispose(); $Job.RS.Dispose()
+    return $out
+}
+function Wait-Until {
+    param([scriptblock]$Cond, [int]$TimeoutSec = 20)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (& $Cond)) { if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) { return $false }; Start-Sleep -Milliseconds 10 }
+    return $true
+}
+
+# Test hook: the 'temp' category is pointed at a private folder with many small files.
+$tr = Join-Path $env:UPDATECENTER_DATADIR 'progroot'
+$fileCount = 9000
+foreach ($d in 0..4) { New-Item -ItemType Directory -Path (Join-Path $tr "d$d") -Force | Out-Null }
+for ($i = 0; $i -lt $fileCount; $i++) { [IO.File]::WriteAllText((Join-Path $tr ("d{0}\f{1}.tmp" -f ($i % 5), $i)), ('x' * 100)) }
+$env:UPDATECENTER_CLEANUP_TESTROOT = $tr
+$expectBytes = [long]($fileCount * 100)
+
+Check 'hook: ignored when pointing outside the temp folder' {
+    $env:UPDATECENTER_CLEANUP_TESTROOT = 'C:\Windows'
+    try { $t = @(& (Get-Module Cleanup) { Get-CleanupTargets -Id 'temp' }) } finally { $env:UPDATECENTER_CLEANUP_TESTROOT = $tr }
+    @($t | Where-Object { $_.Root -ieq 'C:\Windows' }).Count -eq 0
+}
+Check 'dism progress parser (English/German/comma/none)' {
+    (ConvertFrom-DismProgress '[==========================100.0%==========================]') -eq 100 -and
+    (ConvertFrom-DismProgress "Deployment Image Servicing`r`n[=====                      10.0%                           ]") -eq 10 -and
+    (ConvertFrom-DismProgress "[===========                20,5%                          ]`r[==============             45.0%                         ]") -eq 45 -and
+    (ConvertFrom-DismProgress '[==                          3,5%                           ]') -eq 3.5 -and
+    $null -eq (ConvertFrom-DismProgress 'Der Vorgang wurde erfolgreich beendet.') -and
+    $null -eq (ConvertFrom-DismProgress '')
+}
+
+# Invoke-Cleanup: percent rises monotonically to 100, CanCancel is set, result is WouldClean (DryRun).
+$prog = [hashtable]::Synchronized(@{})
+$job = Start-ModJob -Progress $prog -Code '$r = Invoke-Cleanup -Ids "temp" -DryRun -Progress $Progress; $r'
+$samples = New-Object System.Collections.Generic.List[double]
+$sawCancel = $false; $sawPhaseClean = $false; $sawText = ''
+while (-not $job.Handle.IsCompleted) {
+    $pc = $prog['Percent']; if ($null -ne $pc) { $samples.Add([double]$pc) }
+    if ($prog['CanCancel'] -eq $true) { $sawCancel = $true }
+    if ($prog['Phase'] -eq 'clean') { $sawPhaseClean = $true; if ($prog['Text']) { $sawText = [string]$prog['Text'] } }
+    Start-Sleep -Milliseconds 3
+}
+$res = @(Receive-ModJob $job)
+Check 'cleanup progress: result WouldClean with the right size' { $res.Count -eq 1 -and $res[0].Status -eq 'WouldClean' -and $res[0].FreedBytes -eq $expectBytes }
+Check 'cleanup progress: percent ends at 100, never runs backwards' {
+    if ($prog['Percent'] -ne 100) { throw "final $($prog['Percent'])" }
+    for ($i = 1; $i -lt $samples.Count; $i++) { if ($samples[$i] -lt $samples[$i - 1]) { throw "backwards at $i ($($samples[$i - 1]) -> $($samples[$i]))" } }
+    $true
+}
+Check "cleanup progress: percent actually rises ($(@($samples | Select-Object -Unique).Count) distinct values)" { @($samples | Select-Object -Unique).Count -ge 3 }
+Check 'cleanup progress: CanCancel/CanPause/Phase/Text written' {
+    $sawCancel -and $sawPhaseClean -and $sawText -and ($prog['CanPause'] -is [bool]) -and ($prog['CanCancel'] -eq $false)
+}
+
+# Pause blocks until Pause=false (deterministic: Pause is set before the run).
+$prog = [hashtable]::Synchronized(@{ Pause = $true })
+$job = Start-ModJob -Progress $prog -Code '$r = Invoke-Cleanup -Ids "temp" -DryRun -Progress $Progress; $r'
+Check 'pause: run blocks at a safe point and reports the paused text' {
+    if (-not (Wait-Until { $prog['Text'] -eq $pausedText })) { throw "never paused (Text='$($prog['Text'])')" }
+    Start-Sleep -Milliseconds 1200
+    if ($job.Handle.IsCompleted) { throw 'finished while paused' }
+    $prog['CanPause'] -eq $true -and $prog['CanCancel'] -eq $true
+}
+$prog['Pause'] = $false
+$res = @(Receive-ModJob $job)
+Check 'pause: resumes after Pause=false and completes normally' { $res[0].Status -eq 'WouldClean' -and $res[0].FreedBytes -eq $expectBytes -and $prog['Percent'] -eq 100 }
+
+# Cancel while paused in the analysis pass -> every id is Cancelled.
+$prog = [hashtable]::Synchronized(@{ Pause = $true })
+$job = Start-ModJob -Progress $prog -Code '$r = Invoke-Cleanup -Ids "temp","thumbs" -DryRun -Progress $Progress; $r'
+[void](Wait-Until { $prog['Text'] -eq $pausedText })
+$prog['Cancel'] = $true
+$res = @(Receive-ModJob $job -TimeoutSec 20)
+Check 'cancel (during analysis, while paused): all results Cancelled, message prog.cancelled' {
+    $res.Count -eq 2 -and @($res | Where-Object { $_.Status -ne 'Cancelled' -or $_.Message -ne 'prog.cancelled' }).Count -eq 0
+}
+Check 'cancel: no file was touched' { @(Get-ChildItem $tr -Recurse -File).Count -eq $fileCount }
+
+# Cancel between files: paused at the first file of the delete loop, then cancelled -> nothing processed.
+$found = & (Get-Module Cleanup) { param($r) Get-CleanupFiles -Root $r } $tr
+$prog = [hashtable]::Synchronized(@{ Pause = $true; CanPause = $true; CanCancel = $true })
+$rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+$rs.SessionStateProxy.SetVariable('Progress', $prog); $rs.SessionStateProxy.SetVariable('Found', $found); $rs.SessionStateProxy.SetVariable('Tr', $tr)
+$rs.SessionStateProxy.SetVariable('ModPath', (Join-Path $root 'src\Cleanup.psm1'))
+$ps = [powershell]::Create(); $ps.Runspace = $rs
+[void]$ps.AddScript('Import-Module $ModPath -Force -DisableNameChecking; Clear-CleanupFolder -Root $Tr -DryRun -Found $Found -Progress $Progress')
+$h = $ps.BeginInvoke()
+[void](Wait-Until { $prog['Text'] -eq $pausedText })
+$prog['Cancel'] = $true
+[void](Wait-Until { $h.IsCompleted } 20)
+$cr = @($ps.EndInvoke($h)); $ps.Dispose(); $rs.Dispose()
+Check 'cancel between files: Clear-CleanupFolder returns Cancelled without processing' { $cr[0].Cancelled -eq $true -and $cr[0].Files -eq 0 }
+
+# Mid-run cancel (race: cancel as soon as the clean phase reports progress); retried until it lands inside the run.
+$midOk = $false; $midInfo = ''
+for ($try = 0; $try -lt 8 -and -not $midOk; $try++) {
+    $prog = [hashtable]::Synchronized(@{})
+    $job = Start-ModJob -Progress $prog -Code '$r = Invoke-Cleanup -Ids "temp" -DryRun -Progress $Progress; $r'
+    [void](Wait-Until { $prog['Phase'] -eq 'clean' -and $prog['Percent'] -gt 10 } 30)
+    $prog['Cancel'] = $true
+    $res = @(Receive-ModJob $job)
+    $midInfo = "$($res[0].Status) freed=$($res[0].FreedBytes)"
+    if ($res[0].Status -eq 'Cancelled' -and $res[0].FreedBytes -gt 0 -and $res[0].FreedBytes -lt $expectBytes -and $res[0].Message -eq 'prog.cancelled') { $midOk = $true }
+}
+Check "cancel mid-run: Cancelled with partial FreedBytes ($midInfo)" { $midOk }
+
+# Get-CleanupCategories with progress: percent by category count, ends at 100, same shape.
+$prog = [hashtable]::Synchronized(@{})
+$cats2 = @(Get-CleanupCategories -Progress $prog)
+Check 'categories progress: percent 100, CanCancel written, all ids present' {
+    $prog['Percent'] -eq 100 -and $prog.ContainsKey('CanCancel') -and $prog['Phase'] -eq 'scan' -and $cats2.Count -eq $expected.Count -and
+    (($cats2 | Where-Object Id -eq 'temp').ItemCount -eq $fileCount)
+}
+$prog = [hashtable]::Synchronized(@{ Cancel = $true })
+$cats3 = @(Get-CleanupCategories -Progress $prog)
+Check 'categories progress: Cancel=true returns full-shape list marked cancelled' {
+    $cats3.Count -eq $expected.Count -and @($cats3 | Where-Object { $_.Note -ne 'cancelled' }).Count -eq 0
+}
+Remove-Item Env:\UPDATECENTER_CLEANUP_TESTROOT -ErrorAction SilentlyContinue
+
+# Real deletion engine with a progress table, on a private folder only.
+$t2 = Join-Path $env:UPDATECENTER_DATADIR 'engine2'
+New-Item -ItemType Directory -Path $t2 -Force | Out-Null
+1..40 | ForEach-Object { [IO.File]::WriteAllText((Join-Path $t2 "f$_.tmp"), 'abc') }
+$prog = [hashtable]::Synchronized(@{ CanPause = $true })
+$r2 = Clear-CleanupFolder -Root $t2 -Progress $prog
+Check 'engine with progress table: deletes all files, not cancelled' { $r2.Files -eq 40 -and -not $r2.Cancelled -and @(Get-ChildItem $t2 -File).Count -eq 0 }
+
 Remove-Item $env:UPDATECENTER_DATADIR -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 if ($failures.Count -gt 0) { Write-Host "FAILED ($($failures.Count)):" -ForegroundColor Red; $failures | ForEach-Object { Write-Host "  $_" }; exit 1 }

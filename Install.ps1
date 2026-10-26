@@ -76,6 +76,7 @@ Register-GuiTask -AppRoot $target
 Register-ScheduleTask -Config $config -AppRoot $target
 Set-Autostart -Enabled ([bool]$config.StartWithWindows) -AppRoot $target
 Set-BackgroundCheck -Interval ([string]$config.CheckInterval) -AppRoot $target
+Set-CleanupSchedule -Schedule ([string]$config.CleanupSchedule) -AppRoot $target
 $names = Get-TaskNames
 
 # ------------------------------------------------------------------ shortcuts

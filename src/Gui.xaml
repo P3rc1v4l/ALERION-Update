@@ -216,9 +216,27 @@
     <Style TargetType="ProgressBar">
       <Setter Property="Height" Value="6"/>
       <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ProgressBar">
-        <Grid><Border x:Name="PART_Track" CornerRadius="3" Background="#1AFFFFFF"/>
-          <Border x:Name="PART_Indicator" CornerRadius="3" Background="{StaticResource Accent}" HorizontalAlignment="Left"/></Grid>
+        <Grid ClipToBounds="True"><Border x:Name="PART_Track" CornerRadius="3" Background="#1AFFFFFF"/>
+          <Border x:Name="PART_Indicator" CornerRadius="3" Background="{StaticResource Accent}" HorizontalAlignment="Left"/>
+          <Border x:Name="Runner" CornerRadius="3" Background="{StaticResource Accent}" Width="110" HorizontalAlignment="Left" Visibility="Collapsed">
+            <Border.RenderTransform><TranslateTransform/></Border.RenderTransform></Border></Grid>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsIndeterminate" Value="True">
+            <Setter TargetName="PART_Indicator" Property="Visibility" Value="Collapsed"/>
+            <Setter TargetName="Runner" Property="Visibility" Value="Visible"/>
+            <Trigger.EnterActions><BeginStoryboard x:Name="RunSb"><Storyboard RepeatBehavior="Forever">
+              <DoubleAnimation Storyboard.TargetName="Runner" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.X)" From="-110" To="1100" Duration="0:0:2.2"/>
+            </Storyboard></BeginStoryboard></Trigger.EnterActions>
+            <Trigger.ExitActions><StopStoryboard BeginStoryboardName="RunSb"/></Trigger.ExitActions>
+          </Trigger>
+        </ControlTemplate.Triggers>
       </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="RowProgress" TargetType="ProgressBar" BasedOn="{StaticResource {x:Type ProgressBar}}">
+      <Setter Property="Maximum" Value="100"/><Setter Property="Height" Value="5"/><Setter Property="Margin" Value="0,7,0,1"/>
+      <Setter Property="Value" Value="{Binding Percent}"/><Setter Property="IsIndeterminate" Value="{Binding Indeterminate}"/>
+      <Setter Property="Visibility" Value="Collapsed"/>
+      <Style.Triggers><DataTrigger Binding="{Binding ShowProgress}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
     </Style>
     <Style TargetType="DataGrid">
       <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="#F5F7FA"/><Setter Property="BorderThickness" Value="0"/>
@@ -359,6 +377,11 @@
               <Border Style="{StaticResource NavTile}"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#34D399" Offset="0"/><GradientStop Color="#059669" Offset="1"/></LinearGradientBrush></Border.Background>
                 <TextBlock Text="&#xE74D;" Style="{StaticResource NavGlyph}"/></Border>
               <TextBlock x:Name="TxtNavPrograms" VerticalAlignment="Center"/></StackPanel></RadioButton>
+          <RadioButton x:Name="NavStartup" DockPanel.Dock="Top" Style="{StaticResource Nav}" GroupName="nav">
+            <StackPanel Orientation="Horizontal">
+              <Border Style="{StaticResource NavTile}"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#38BDF8" Offset="0"/><GradientStop Color="#0369A1" Offset="1"/></LinearGradientBrush></Border.Background>
+                <TextBlock Text="&#xE7E8;" Style="{StaticResource NavGlyph}"/></Border>
+              <TextBlock x:Name="TxtNavStartup" VerticalAlignment="Center"/></StackPanel></RadioButton>
           <RadioButton x:Name="NavCleanup" DockPanel.Dock="Top" Style="{StaticResource Nav}" GroupName="nav">
             <StackPanel Orientation="Horizontal">
               <Border Style="{StaticResource NavTile}"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#A78BFA" Offset="0"/><GradientStop Color="#6D28D9" Offset="1"/></LinearGradientBrush></Border.Background>
@@ -368,13 +391,14 @@
             <StackPanel Orientation="Horizontal">
               <Border Style="{StaticResource NavTile}"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#F87171" Offset="0"/><GradientStop Color="#DC2626" Offset="1"/></LinearGradientBrush></Border.Background>
                 <TextBlock Text="&#xEA18;" Style="{StaticResource NavGlyph}"/></Border>
-              <TextBlock x:Name="TxtNavSecurity" VerticalAlignment="Center"/></StackPanel></RadioButton>          <RadioButton x:Name="NavHistory" DockPanel.Dock="Top" Style="{StaticResource Nav}" GroupName="nav">
-            <StackPanel Orientation="Horizontal">
-              <Border Style="{StaticResource NavTile}"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#F59E0B" Offset="0"/><GradientStop Color="#EC4899" Offset="1"/></LinearGradientBrush></Border.Background>
-                <TextBlock Text="&#xE81C;" Style="{StaticResource NavGlyph}"/></Border>
-              <TextBlock x:Name="TxtNavHistory" VerticalAlignment="Center"/></StackPanel></RadioButton>
+              <TextBlock x:Name="TxtNavSecurity" VerticalAlignment="Center"/></StackPanel></RadioButton>
 
           <StackPanel DockPanel.Dock="Bottom">
+            <RadioButton x:Name="NavHistory" Style="{StaticResource Nav}" GroupName="nav">
+              <StackPanel Orientation="Horizontal">
+                <Border Style="{StaticResource NavTile}"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#F59E0B" Offset="0"/><GradientStop Color="#EC4899" Offset="1"/></LinearGradientBrush></Border.Background>
+                  <TextBlock Text="&#xE81C;" Style="{StaticResource NavGlyph}"/></Border>
+                <TextBlock x:Name="TxtNavHistory" VerticalAlignment="Center"/></StackPanel></RadioButton>
             <RadioButton x:Name="NavSettings" Style="{StaticResource Nav}" GroupName="nav">
               <StackPanel Orientation="Horizontal">
                 <Border Style="{StaticResource NavTile}"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#8A93A1" Offset="0"/><GradientStop Color="#4B5260" Offset="1"/></LinearGradientBrush></Border.Background>
@@ -437,6 +461,38 @@
               </StackPanel>
             </Border>
 
+            <!-- running activities of the other modules (cleanup, scans, uninstall ...) -->
+            <Border x:Name="ActivityCard" Style="{StaticResource Card}" Margin="0,14,0,0" Padding="0" Visibility="Collapsed">
+              <StackPanel>
+                <TextBlock x:Name="LblActivities" Style="{StaticResource Section}" Margin="18,14,0,2"/>
+                <ItemsControl x:Name="ActivityList">
+                  <ItemsControl.ItemTemplate><DataTemplate>
+                    <Border Padding="18,11" BorderBrush="#10FFFFFF" BorderThickness="0,1,0,0">
+                      <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <Border Width="34" Height="34" CornerRadius="10" Background="{Binding BadgeBrush}" Margin="0,0,14,0" VerticalAlignment="Center">
+                          <TextBlock Text="{Binding Glyph}" FontFamily="{StaticResource Icons}" FontSize="15" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                          <Grid><TextBlock Text="{Binding Title}" FontWeight="SemiBold" Margin="0,0,60,0"/>
+                            <TextBlock Text="{Binding Right}" HorizontalAlignment="Right" Foreground="#A3ABB8" FontSize="12" FontFamily="{StaticResource Mono}"/></Grid>
+                          <TextBlock Text="{Binding Detail}" Foreground="#8A93A1" FontSize="11.5" Margin="0,2,0,0"/>
+                          <ProgressBar Style="{StaticResource RowProgress}"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0">
+                          <Button x:Name="ActOpen" Content="{DynamicResource OpenText}" Style="{StaticResource Link}" Margin="0,0,4,0"/>
+                          <Button x:Name="ActPause" Content="{Binding ActionText}" Padding="12,5" FontSize="12" Margin="0,0,8,0">
+                            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Secondary}"><Setter Property="Visibility" Value="Collapsed"/>
+                              <Style.Triggers><DataTrigger Binding="{Binding CanPause}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
+                          <Button x:Name="ActCancel" Content="{DynamicResource CancelText}" Padding="12,5" FontSize="12">
+                            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Danger}"><Setter Property="Visibility" Value="Collapsed"/>
+                              <Style.Triggers><DataTrigger Binding="{Binding CanCancel}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
+                        </StackPanel>
+                      </Grid>
+                    </Border>
+                  </DataTemplate></ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </Border>
+
             <!-- restart -->
             <Border x:Name="RebootBanner" Style="{StaticResource Card}" Margin="0,14,0,0" Padding="16,14" Visibility="Collapsed">
               <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -471,6 +527,27 @@
                   <TextBlock x:Name="TxtTileOptional" FontFamily="{StaticResource Display}" FontSize="34" FontWeight="SemiBold" Margin="0,4,0,0"/></StackPanel>
                 <Border Width="30" Height="30" CornerRadius="10" HorizontalAlignment="Right" VerticalAlignment="Top" Background="#268A93A1">
                   <TextBlock Text="&#xE9CE;" FontFamily="{StaticResource Icons}" FontSize="13" Foreground="#A3ABB8" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border></Grid></Button>
+            </UniformGrid>
+
+            <!-- status of the other modules -->
+            <UniformGrid Columns="4" Margin="-6,2,-6,0">
+              <Button x:Name="ModPrograms" Style="{StaticResource Tile}" Margin="6"><StackPanel>
+                <TextBlock x:Name="LblModPrograms" Foreground="#A3ABB8" FontSize="12.5"/>
+                <TextBlock x:Name="TxtModPrograms" FontFamily="{StaticResource Display}" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0"/>
+                <TextBlock x:Name="SubModPrograms" Foreground="#8A93A1" FontSize="11.5" Margin="0,2,0,0"/></StackPanel></Button>
+              <Button x:Name="ModStartup" Style="{StaticResource Tile}" Margin="6"><StackPanel>
+                <TextBlock x:Name="LblModStartup" Foreground="#A3ABB8" FontSize="12.5"/>
+                <TextBlock x:Name="TxtModStartup" FontFamily="{StaticResource Display}" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0"/>
+                <TextBlock x:Name="SubModStartup" Foreground="#8A93A1" FontSize="11.5" Margin="0,2,0,0"/></StackPanel></Button>
+              <Button x:Name="ModCleanup" Style="{StaticResource Tile}" Margin="6"><StackPanel>
+                <TextBlock x:Name="LblModCleanup" Foreground="#A3ABB8" FontSize="12.5"/>
+                <TextBlock x:Name="TxtModCleanup" FontFamily="{StaticResource Display}" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0"/>
+                <TextBlock x:Name="SubModCleanup" Foreground="#8A93A1" FontSize="11.5" Margin="0,2,0,0"/></StackPanel></Button>
+              <Button x:Name="ModSecurity" Style="{StaticResource Tile}" Margin="6"><StackPanel>
+                <TextBlock x:Name="LblModSecurity" Foreground="#A3ABB8" FontSize="12.5"/>
+                <StackPanel Orientation="Horizontal" Margin="0,4,0,0"><Ellipse x:Name="DotModSecurity" Width="9" Height="9" Fill="#6B7380" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                  <TextBlock x:Name="TxtModSecurity" FontFamily="{StaticResource Display}" FontSize="20" FontWeight="SemiBold"/></StackPanel>
+                <TextBlock x:Name="SubModSecurity" Foreground="#8A93A1" FontSize="11.5" Margin="0,2,0,0"/></StackPanel></Button>
             </UniformGrid>
 
             <!-- facts (inset grouped) -->
@@ -558,6 +635,10 @@
                       <TextBlock Text="  &#x00B7;  " Foreground="#6B7380" FontSize="11.5"/>
                       <TextBlock Text="{Binding Id}" Foreground="#6B7380" FontSize="11.5" MaxWidth="300"/>
                       <TextBlock Text="{Binding Note}" Foreground="#8A93A1" FontSize="11.5" Margin="10,0,0,0" MaxWidth="300"/>
+                      <Button x:Name="RowAction" Content="{Binding ActionText}" FontSize="11.5" Padding="8,0" Margin="6,0,0,0">
+                        <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Link}"><Style.Triggers>
+                          <DataTrigger Binding="{Binding ActionText}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+                          <DataTrigger Binding="{Binding ActionText}" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
                     </StackPanel>
                   </StackPanel>
                   <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
@@ -636,6 +717,7 @@
                       <TextBlock Text="{Binding Subtitle}" Foreground="#6B7380" FontSize="11.5" Margin="0,2,0,0"/>
                       <TextBlock Text="{Binding Detail}" Foreground="#8A93A1" FontSize="11.5" Margin="0,2,0,0" TextWrapping="Wrap" TextTrimming="None">
                         <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers><Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger><Trigger Property="Text" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></Trigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
+                      <ProgressBar Style="{StaticResource RowProgress}"/>
                     </StackPanel>
                     <TextBlock Grid.Column="1" Text="{Binding Right}" Foreground="#A3ABB8" FontFamily="{StaticResource Mono}" FontSize="12" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,14,0"/>
                     <Border Grid.Column="2" CornerRadius="8" Padding="8,2" Background="#12FFFFFF" VerticalAlignment="Center" Margin="0,0,10,0">
@@ -650,6 +732,60 @@
                 </DataTemplate></ListBox.ItemTemplate>
               </ListBox>
               <TextBlock x:Name="TxtProgEmpty" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="#8A93A1" Visibility="Collapsed"/>
+            </Grid>
+          </Border>
+        </Grid>
+
+        <!-- Startup (autostart manager, reversible like Task Manager) -->
+        <Grid x:Name="PageStartup" Grid.Row="1" Visibility="Collapsed" Margin="30,0,30,24">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
+          <Grid>
+            <StackPanel Margin="0,0,330,0"><TextBlock x:Name="TxtStartupTitle" Style="{StaticResource Title}"/><TextBlock x:Name="TxtStartupSub" Foreground="#8A93A1" Margin="2,3,0,0" TextWrapping="Wrap" TextTrimming="None"/></StackPanel>
+            <Grid HorizontalAlignment="Right" Width="310" VerticalAlignment="Center">
+              <TextBox x:Name="TxtStartSearch" Padding="34,0,12,0" Height="38"/>
+              <TextBlock Text="&#xE721;" FontFamily="{StaticResource Icons}" Foreground="#8A93A1" Margin="13,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+              <TextBlock x:Name="TxtStartSearchHint" Foreground="#6B7380" Margin="36,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+            </Grid>
+          </Grid>
+          <Grid Grid.Row="1" Margin="0,16,0,10">
+            <Border Style="{StaticResource SegmentBar}"><StackPanel Orientation="Horizontal">
+              <RadioButton x:Name="SegStartAll" Style="{StaticResource Segment}" GroupName="startseg" IsChecked="True"/>
+              <RadioButton x:Name="SegStartOn" Style="{StaticResource Segment}" GroupName="startseg"/>
+              <RadioButton x:Name="SegStartOff" Style="{StaticResource Segment}" GroupName="startseg"/></StackPanel></Border>
+            <Button x:Name="BtnStartRefresh" Style="{StaticResource Secondary}" Padding="14,7" HorizontalAlignment="Right"/>
+          </Grid>
+          <Border Grid.Row="2" CornerRadius="18" Background="#0DFFFFFF" BorderBrush="{StaticResource GlassEdge}" BorderThickness="1">
+            <Grid>
+              <ListBox x:Name="StartupList" Background="Transparent" BorderThickness="0" Foreground="#F5F7FA" HorizontalContentAlignment="Stretch"
+                       ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.ScrollUnit="Pixel">
+                <ListBox.ItemContainerStyle>
+                  <Style TargetType="ListBoxItem">
+                    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
+                      <Border x:Name="b" Padding="16,11" Background="Transparent" BorderBrush="#10FFFFFF" BorderThickness="0,0,0,1"><ContentPresenter/></Border>
+                      <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#08FFFFFF"/></Trigger></ControlTemplate.Triggers>
+                    </ControlTemplate></Setter.Value></Setter>
+                  </Style>
+                </ListBox.ItemContainerStyle>
+                <ListBox.ItemTemplate><DataTemplate>
+                  <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                      <TextBlock Text="{Binding Title}" FontWeight="SemiBold"/>
+                      <TextBlock Text="{Binding Subtitle}" Foreground="#6B7380" FontSize="11.5" Margin="0,2,0,0"/>
+                      <TextBlock Text="{Binding Detail}" Foreground="#8A93A1" FontSize="11.5" Margin="0,2,0,0" TextWrapping="Wrap" TextTrimming="None">
+                        <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers><Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger><Trigger Property="Text" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></Trigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
+                    </StackPanel>
+                    <Border Grid.Column="1" CornerRadius="8" Padding="8,2" Background="#12FFFFFF" VerticalAlignment="Center" Margin="0,0,10,0">
+                      <StackPanel Orientation="Horizontal"><Ellipse Width="6" Height="6" Fill="{Binding BadgeBrush}" Margin="0,0,6,0"/><TextBlock Text="{Binding Badge}" Foreground="#D5DAE3" FontSize="11"/></StackPanel></Border>
+                    <TextBlock Grid.Column="2" Text="{Binding State}" Foreground="{Binding StateBrush}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,14,0" MinWidth="70"/>
+                    <CheckBox x:Name="StartToggle" Grid.Column="3" IsChecked="{Binding Selected, Mode=OneWay}" VerticalAlignment="Center">
+                      <CheckBox.Style><Style TargetType="CheckBox" BasedOn="{StaticResource Toggle}"><Style.Triggers>
+                        <DataTrigger Binding="{Binding Locked}" Value="True"><Setter Property="IsEnabled" Value="False"/></DataTrigger>
+                        <DataTrigger Binding="{Binding Busy}" Value="True"><Setter Property="IsEnabled" Value="False"/></DataTrigger></Style.Triggers></Style></CheckBox.Style></CheckBox>
+                  </Grid>
+                </DataTemplate></ListBox.ItemTemplate>
+              </ListBox>
+              <TextBlock x:Name="TxtStartEmpty" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="#8A93A1" Visibility="Collapsed"/>
             </Grid>
           </Border>
         </Grid>
@@ -693,6 +829,15 @@
               <Grid>
                 <TextBlock x:Name="TxtCleanupTotal" Foreground="#D5DAE3" VerticalAlignment="Center" FontWeight="SemiBold" Margin="0,0,220,0"/>
                 <Button x:Name="BtnCleanupRun" Style="{StaticResource Primary}" HorizontalAlignment="Right"/>
+                <Grid x:Name="CleanupProgPanel" Visibility="Collapsed" Background="#F21B1E25">
+                  <StackPanel VerticalAlignment="Center" Margin="0,0,230,0">
+                    <Grid><TextBlock x:Name="TxtCleanupProg" Foreground="#D5DAE3" FontWeight="SemiBold" Margin="0,0,50,0"/>
+                      <TextBlock x:Name="TxtCleanupPct" HorizontalAlignment="Right" Foreground="#A3ABB8" FontFamily="{StaticResource Mono}" FontSize="12"/></Grid>
+                    <ProgressBar x:Name="CleanupProg" Maximum="100" Margin="0,7,0,0"/></StackPanel>
+                  <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Button x:Name="BtnCleanupPause" Style="{StaticResource Secondary}" Margin="0,0,8,0" Padding="14,7"/>
+                    <Button x:Name="BtnCleanupCancel" Style="{StaticResource Danger}" Padding="14,7"/></StackPanel>
+                </Grid>
               </Grid>
             </Border>
           </Grid>
@@ -723,6 +868,7 @@
                     <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
                       <TextBlock Text="{Binding Title}" FontWeight="SemiBold"/>
                       <TextBlock Text="{Binding Subtitle}" Foreground="#8A93A1" FontSize="11.5" Margin="0,2,0,0" TextWrapping="Wrap" TextTrimming="None"/>
+                      <ProgressBar Style="{StaticResource RowProgress}"/>
                     </StackPanel>
                     <TextBlock Grid.Column="2" Text="{Binding State}" Foreground="{Binding StateBrush}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,14,0" MaxWidth="260" TextWrapping="Wrap" TextTrimming="None"/>
                     <Button x:Name="ScanAction" Grid.Column="3" Content="{Binding ActionText}" Style="{StaticResource Secondary}" Padding="14,6" FontSize="12">
@@ -844,9 +990,21 @@
               <Border Style="{StaticResource Row}"><CheckBox x:Name="ChkParallel" Style="{StaticResource Toggle}"/></Border>
               <Border Style="{StaticResource Row}"><CheckBox x:Name="ChkRestore" Style="{StaticResource Toggle}"/></Border>
               <Border Style="{StaticResource Row}"><CheckBox x:Name="ChkAutostart" Style="{StaticResource Toggle}"/></Border>
+              <Border Style="{StaticResource Row}"><CheckBox x:Name="ChkTray" Style="{StaticResource Toggle}"/></Border>
+              <Border Style="{StaticResource Row}"><Grid><StackPanel VerticalAlignment="Center" Margin="0,0,260,0"><TextBlock x:Name="LblRunning"/><TextBlock x:Name="TxtRunningHint" Style="{StaticResource Caption}" Margin="0,2,0,0"/></StackPanel>
+                <ComboBox x:Name="CmbRunning" HorizontalAlignment="Right" VerticalAlignment="Center" MinWidth="230"/></Grid></Border>
               <Border Style="{StaticResource Row}"><Grid><StackPanel VerticalAlignment="Center" Margin="0,0,220,0"><TextBlock x:Name="LblNotify"/><TextBlock x:Name="TxtNotifyHint" Style="{StaticResource Caption}" Margin="0,2,0,0"/></StackPanel>
                 <Button x:Name="BtnTestToast" Style="{StaticResource Secondary}" HorizontalAlignment="Right" VerticalAlignment="Center" Padding="14,7"/></Grid></Border>
               <Border Style="{StaticResource RowLast}"><Grid><TextBlock x:Name="LblLang" VerticalAlignment="Center"/><ComboBox x:Name="CmbLang" HorizontalAlignment="Right" MinWidth="230"/></Grid></Border>
+            </StackPanel></Border>
+
+            <TextBlock x:Name="LblDrivers" Style="{StaticResource Section}"/>
+            <Border Style="{StaticResource Card}" Padding="0"><StackPanel>
+              <Border Style="{StaticResource Row}"><Grid><StackPanel VerticalAlignment="Center" Margin="0,0,260,0"><TextBlock x:Name="LblNvidia"/><TextBlock x:Name="TxtNvidiaHint" Style="{StaticResource Caption}" Margin="0,2,0,0"/></StackPanel>
+                <ComboBox x:Name="CmbNvidia" HorizontalAlignment="Right" VerticalAlignment="Center" MinWidth="230"/></Grid></Border>
+              <Border Style="{StaticResource Row}"><CheckBox x:Name="ChkBackupDrivers" Style="{StaticResource Toggle}"/></Border>
+              <Border Style="{StaticResource RowLast}"><Grid><StackPanel VerticalAlignment="Center" Margin="0,0,260,0"><TextBlock x:Name="LblCleanSched"/><TextBlock x:Name="TxtCleanSchedHint" Style="{StaticResource Caption}" Margin="0,2,0,0"/></StackPanel>
+                <ComboBox x:Name="CmbCleanSched" HorizontalAlignment="Right" VerticalAlignment="Center" MinWidth="230"/></Grid></Border>
             </StackPanel></Border>
 
             <TextBlock x:Name="LblSources" Style="{StaticResource Section}"/>
@@ -873,7 +1031,7 @@
                 <CheckBox x:Name="ChkSelf" Style="{StaticResource Toggle}"/>
                 <TextBlock x:Name="TxtSelfStatus" Style="{StaticResource Caption}" Margin="0,6,60,0"/></StackPanel></Border>
               <Border Style="{StaticResource Row}"><Grid><TextBlock x:Name="LblRepo" VerticalAlignment="Center"/><TextBox x:Name="TxtRepo" HorizontalAlignment="Right" Width="300"/></Grid></Border>
-              <Border Style="{StaticResource RowLast}"><Grid><StackPanel VerticalAlignment="Center" Margin="0,0,220,0"><TextBlock x:Name="LblAppVersion"/><TextBlock x:Name="TxtAppUpdateStatus" Style="{StaticResource Caption}" Margin="0,2,0,0"/></StackPanel>
+              <Border Style="{StaticResource RowLast}"><Grid><StackPanel VerticalAlignment="Center" Margin="0,0,220,0"><TextBlock x:Name="LblAppVersion"/><TextBlock x:Name="TxtAppUpdateStatus" Style="{StaticResource Caption}" Margin="0,2,0,0"/><TextBlock x:Name="TxtSignStatus" Style="{StaticResource Caption}" Margin="0,2,0,0"/></StackPanel>
                 <Button x:Name="BtnCheckAppUpdate" Style="{StaticResource Secondary}" HorizontalAlignment="Right" VerticalAlignment="Center" Padding="14,7"/></Grid></Border>
             </StackPanel></Border>
           </StackPanel>

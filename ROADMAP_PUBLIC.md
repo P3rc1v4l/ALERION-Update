@@ -6,22 +6,20 @@
 ---
 
 ## 🚀 Coming Soon
-- NVIDIA Studio-Treiber als Option
-- „Neu installieren“ für Pakete mit anderer Installationsart
-- Changelog-Link je Update direkt in der Liste
-- Autostart-Programme verwalten
+- Helles Design passend zu Windows
+- Signierte Releases (kein SmartScreen-Hinweis mehr)
+- Scoop- und PowerShell-Modul-Updates
 
 ## 📋 Planned
-- Scoop- und PowerShell-Modul-Updates
-- Hell-/Dunkel-Design passend zu Windows
-- Eigene Prioritäten pro Programm festlegen
-- Geplantes automatisches Aufräumen
+- Mehr Hersteller-Treiber (MSI, Gigabyte, Acer)
+- Update-Verlauf als Diagramm
+- Export/Import der Einstellungen
 
 ## ✅ Recently Shipped
+- v1.5.0: Autostart-Manager, Live-Fortschritt mit Abbrechen/Pausieren
+- v1.5.0: Hersteller-Treiber, Apps mit eigenem Updater, Neu installieren
 - v1.4.0: Programme sauber deinstallieren, Aufräumen, Sicherheits-Check
-- v1.4.0: Hintergrund-Suche, bessere Behandlung fehlgeschlagener Updates
 - v1.3.0: Neuer Name „Update Center“, neues Logo, Setup.exe
-- v1.2.0: Neues Design, Neustart zur Wunschzeit mit Dauer
 
 ---
 <!--

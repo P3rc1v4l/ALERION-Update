@@ -14,6 +14,7 @@ $script:TaskSchedule  = 'Update Center'
 $script:TaskGui       = 'Update Center GUI'
 $script:TaskAutostart = 'Update Center Autostart'
 $script:TaskCheck     = 'Update Center Check'
+$script:TaskCleanup   = 'Update Center Cleanup'
 
 function Get-TaskNames { [pscustomobject]@{ Path = $script:TaskPath; Schedule = $script:TaskSchedule; Gui = $script:TaskGui } }
 
@@ -208,6 +209,25 @@ function Set-BackgroundCheck {
     Register-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskCheck -Xml $xml -Force | Out-Null
 }
 
+function Set-CleanupSchedule {
+    <# Recurring cleanup of the configured risk-free categories ('Off' removes the task). Runs at
+       idle-friendly 12:30 so a sleeping PC is not woken; missed runs start when available. #>
+    param([Parameter(Mandatory)][string]$Schedule, [string]$AppRoot = (Get-AppPaths).AppRoot)
+    if ($Schedule -eq 'Off') {
+        Unregister-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskCleanup -Confirm:$false -ErrorAction SilentlyContinue
+        return
+    }
+    $start = (Get-Date).Date.AddDays(1).AddHours(12).AddMinutes(30).ToString('yyyy-MM-ddTHH:mm:ss')
+    $trigger = if ($Schedule -eq 'Monthly') {
+        "<CalendarTrigger><StartBoundary>$start</StartBoundary><Enabled>true</Enabled><ScheduleByMonth><DaysOfMonth><Day>1</Day></DaysOfMonth><Months><January/><February/><March/><April/><May/><June/><July/><August/><September/><October/><November/><December/></Months></ScheduleByMonth></CalendarTrigger>"
+    } else {
+        "<CalendarTrigger><StartBoundary>$start</StartBoundary><Enabled>true</Enabled><ScheduleByWeek><DaysOfWeek><Saturday/></DaysOfWeek><WeeksInterval>1</WeeksInterval></ScheduleByWeek></CalendarTrigger>"
+    }
+    $args2 = "--headless `"$(Get-PowerShellExe)`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $AppRoot 'src\UpdateEngine.ps1')`" -Cleanup"
+    $xml = New-TaskXml -Description 'Removes temporary files and caches on a schedule (Update Center).' -Arguments $args2 -TriggerXml $trigger -TimeLimit 'PT2H'
+    Register-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskCleanup -Xml $xml -Force | Out-Null
+}
+
 function Remove-LegacyTasks {
     <# v1.x ("ALERION Update") task folder. #>
     $legacy = (Get-Product).LegacyTaskPath
@@ -228,7 +248,7 @@ function Test-GuiTask {
 }
 
 function Unregister-AllTasks {
-    foreach ($n in @($script:TaskSchedule, $script:TaskGui, $script:TaskRestart, $script:TaskAutostart, $script:TaskCheck)) {
+    foreach ($n in @($script:TaskSchedule, $script:TaskGui, $script:TaskRestart, $script:TaskAutostart, $script:TaskCheck, $script:TaskCleanup)) {
         Unregister-ScheduledTask -TaskPath $script:TaskPath -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue
     }
 }

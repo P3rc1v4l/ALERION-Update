@@ -34,6 +34,22 @@ Write-Host "Version $tag verified (SHA-256 OK). Starting the installer ..." -For
 
 $app = Join-Path $work 'app'
 Expand-Archive -Path $zip -DestinationPath $app -Force
+# Code-signing check (optional): signed packages carry UpdateCenter.cat, a signed catalog of every file.
+# Verified here with the built-in cmdlets, NOT with code from the package itself.
+$cat = Join-Path $app 'UpdateCenter.cat'
+if (Test-Path -LiteralPath $cat) {
+    $sig = Get-AuthenticodeSignature -LiteralPath $cat
+    $catOk = $false
+    try { $catOk = ((Test-FileCatalog -CatalogFilePath $cat -Path $app -ErrorAction Stop) -eq 'Valid') } catch { }
+    if ($sig.Status -ne 'Valid' -or -not $catOk) {
+        Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+        throw "Package signature is invalid (signature: $($sig.Status), catalog match: $catOk) - installation aborted."
+    }
+    Write-Host ("Signature OK - signed by {0}" -f $sig.SignerCertificate.Subject) -ForegroundColor Green
+} else {
+    Write-Host 'Note: this package is not code-signed (integrity is checked via SHA-256 only).' -ForegroundColor Yellow
+}
+
 Get-ChildItem $app -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
 $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 Start-Process -FilePath $ps -Verb RunAs -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $app 'Install.ps1')`""

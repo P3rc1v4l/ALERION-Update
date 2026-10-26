@@ -148,7 +148,10 @@ function Merge-Config {
     foreach ($p in $Defaults.PSObject.Properties) {
         if (-not ($User.PSObject.Properties.Name -contains $p.Name)) { continue }
         $uv = $User.($p.Name)
-        if ($p.Value -is [System.Management.Automation.PSCustomObject] -and $uv -is [System.Management.Automation.PSCustomObject]) {
+        if ($p.Value -is [System.Management.Automation.PSCustomObject] -and $uv -is [System.Management.Automation.PSCustomObject] -and
+            @($p.Value.PSObject.Properties).Count -eq 0) {
+            $Defaults.($p.Name) = $uv   # free-form maps (e.g. PriorityOverrides) are taken as a whole
+        } elseif ($p.Value -is [System.Management.Automation.PSCustomObject] -and $uv -is [System.Management.Automation.PSCustomObject]) {
             foreach ($q in $p.Value.PSObject.Properties) {
                 if ($uv.PSObject.Properties.Name -contains $q.Name) { $p.Value.($q.Name) = $uv.($q.Name) }
             }
@@ -175,6 +178,13 @@ function Test-Config {
     if ($Config.SelfUpdate.Repo -and $Config.SelfUpdate.Repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { $errors.Add("SelfUpdate.Repo must be 'owner/name'") }
     if ($Config.CheckInterval -notin @('Off', '1h', '3h', '6h', '12h', '24h')) { $errors.Add("CheckInterval must be Off, 1h, 3h, 6h, 12h or 24h") }
     if ($Config.ScheduleAction -notin @('Install', 'Notify')) { $errors.Add("ScheduleAction must be Install or Notify") }
+    if ($Config.NvidiaDriverType -notin @('GameReady', 'Studio')) { $errors.Add("NvidiaDriverType must be GameReady or Studio") }
+    if ($Config.RunningApps -notin @('Ask', 'Close', 'Skip')) { $errors.Add("RunningApps must be Ask, Close or Skip") }
+    if ($Config.CleanupSchedule -notin @('Off', 'Weekly', 'Monthly')) { $errors.Add("CleanupSchedule must be Off, Weekly or Monthly") }
+    foreach ($p in @($Config.PriorityOverrides.PSObject.Properties)) {
+        if ($p.Name -notmatch '^[A-Za-z0-9_.+\-]+$' -or [string]$p.Value -notin (Get-PriorityNames)) { $errors.Add("PriorityOverrides entry invalid: $($p.Name)") }
+    }
+    foreach ($id in @($Config.CleanupIds)) { if ($id -and $id -notmatch '^[a-z]+$') { $errors.Add("CleanupIds contains invalid id: $id") } }
     foreach ($p in @($Config.AutoInstallPriorities)) {
         if ($p -notin (Get-PriorityNames)) { $errors.Add("AutoInstallPriorities contains unknown priority: $p") }
     }
@@ -206,6 +216,7 @@ function Get-Config {
     }
     $cfg.ExcludedPackages = @($cfg.ExcludedPackages | Where-Object { $_ })
     $cfg.AutoInstallPriorities = @($cfg.AutoInstallPriorities | Where-Object { $_ })
+    $cfg.CleanupIds = @($cfg.CleanupIds | Where-Object { $_ })
     return $cfg
 }
 

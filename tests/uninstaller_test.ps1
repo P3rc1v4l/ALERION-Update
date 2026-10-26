@@ -171,6 +171,189 @@ Check 'Remove-AppLeftovers refuses Safe=false and tampered Safe=true on protecte
     $true
 }
 
+# ---------------------------------------------------------------- progress / cancel / pause
+Write-Host 'Progress, cancel, pause' -ForegroundColor Cyan
+$pausedText = T 'prog.paused'
+
+function Start-ModJob {
+    param([string]$Code, [hashtable]$Progress, [hashtable]$Vars = @{})
+    $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+    $rs.SessionStateProxy.SetVariable('Progress', $Progress)
+    $rs.SessionStateProxy.SetVariable('ModPath', (Join-Path $src 'Uninstaller.psm1'))
+    foreach ($k in $Vars.Keys) { $rs.SessionStateProxy.SetVariable($k, $Vars[$k]) }
+    $ps = [powershell]::Create(); $ps.Runspace = $rs
+    [void]$ps.AddScript("Import-Module `$ModPath -Force -DisableNameChecking; " + $Code)
+    [pscustomobject]@{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+}
+function Receive-ModJob {
+    param($Job, [int]$TimeoutSec = 120)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $Job.Handle.IsCompleted) {
+        if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) { $Job.PS.Stop(); throw "job timeout after $TimeoutSec s" }
+        Start-Sleep -Milliseconds 20
+    }
+    $out = @($Job.PS.EndInvoke($Job.Handle))
+    if ($Job.PS.Streams.Error.Count -gt 0) { $e = $Job.PS.Streams.Error[0].ToString(); $Job.PS.Dispose(); $Job.RS.Dispose(); throw $e }
+    $Job.PS.Dispose(); $Job.RS.Dispose()
+    return $out
+}
+function Wait-Until {
+    param([scriptblock]$Cond, [int]$TimeoutSec = 30)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (& $Cond)) { if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) { return $false }; Start-Sleep -Milliseconds 10 }
+    return $true
+}
+
+# Get-InstalledApps with a progress table (read-only scan in a separate runspace, sampled from here).
+$prog = [hashtable]::Synchronized(@{})
+$job = Start-ModJob -Progress $prog -Code '@(Get-InstalledApps -Progress $Progress)'
+$samples = New-Object System.Collections.Generic.List[double]; $sawCancel = $false; $sawPhase = ''; $sawText = ''
+while (-not $job.Handle.IsCompleted) {
+    $pc = $prog['Percent']; if ($null -ne $pc) { $samples.Add([double]$pc) }
+    if ($prog['CanCancel'] -eq $true) { $sawCancel = $true }
+    if ($prog['Phase']) { $sawPhase = [string]$prog['Phase'] }
+    if ($prog['Text']) { $sawText = [string]$prog['Text'] }
+    Start-Sleep -Milliseconds 15
+}
+$listed = @(Receive-ModJob $job)
+Check "Get-InstalledApps progress: same result kind, Percent rises to 100 ($(@($samples | Select-Object -Unique).Count) distinct values)" {
+    if ($listed.Count -lt 1) { throw 'no apps' }
+    if ($prog['Percent'] -ne 100) { throw "final $($prog['Percent'])" }
+    for ($i = 1; $i -lt $samples.Count; $i++) { if ($samples[$i] -lt $samples[$i - 1]) { throw "backwards ($($samples[$i - 1]) -> $($samples[$i]))" } }
+    @($samples | Select-Object -Unique).Count -ge 3
+}
+Check 'Get-InstalledApps progress: CanCancel true while reading, Phase scan, Text set, CanCancel false at the end' {
+    $sawCancel -and $sawPhase -eq 'scan' -and $sawText -and $prog['CanCancel'] -eq $false
+}
+$prog = [hashtable]::Synchronized(@{ Pause = $true })
+$job = Start-ModJob -Progress $prog -Code '@(Get-InstalledApps -Progress $Progress)'
+Check 'Get-InstalledApps pause: blocks until Pause=false' {
+    if (-not (Wait-Until { $prog['Text'] -eq $pausedText })) { throw "never paused (Text='$($prog['Text'])')" }
+    Start-Sleep -Milliseconds 1000
+    if ($job.Handle.IsCompleted) { throw 'finished while paused' }
+    $prog['CanPause'] -eq $true
+}
+$prog['Pause'] = $false
+$l2 = @(Receive-ModJob $job)
+Check 'Get-InstalledApps pause: completes with the full list after resume' { $l2.Count -ge [Math]::Floor($listed.Count * 0.9) -and $prog['Percent'] -eq 100 }
+$prog = [hashtable]::Synchronized(@{ Pause = $true })
+$job = Start-ModJob -Progress $prog -Code '@(Get-InstalledApps -Progress $Progress)'
+[void](Wait-Until { $prog['Text'] -eq $pausedText })
+$prog['Cancel'] = $true
+$sw = [Diagnostics.Stopwatch]::StartNew()
+$l3 = @(Receive-ModJob $job -TimeoutSec 30)
+Check 'Get-InstalledApps cancel (while paused): returns quickly with a partial list, Text = cancelled' {
+    $sw.Elapsed.TotalSeconds -lt 20 -and $l3.Count -lt $listed.Count -and $prog['Text'] -eq (T 'prog.cancelled')
+}
+
+# Invoke-AppUninstall: DryRun with a progress table, cancel before the uninstaller starts.
+function New-ProgFakeApp {
+    param($Name, $Key, $Un = '', $WingetId = '')
+    [pscustomobject]@{ Key = $Key; Name = $Name; Publisher = 'Test Publisher'; Version = '1.0'; SizeMB = 0; InstallDate = ''; Source = 'exe'; WingetId = $WingetId
+        UninstallString = $Un; QuietUninstallString = ''; ProductCode = ''; AppxFullName = ''; InstallLocation = ''; Scope = 'user'; Protected = $false; ProtectedReason = '' }
+}
+Check 'Invoke-AppUninstall -DryRun -Progress returns WouldRemove' {
+    $p = [hashtable]::Synchronized(@{})
+    (Invoke-AppUninstall -App (New-ProgFakeApp -Name 'UC Prog Tool' -Key 'HKCU:\Software\UCNope' -WingetId 'Fake.UCProg') -DryRun -Progress $p).Status -eq 'WouldRemove'
+}
+Check 'Invoke-AppUninstall: Cancel=true -> Status Cancelled, prog.cancelled, nothing executed; phase restorepoint, CanCancel true' {
+    $p = [hashtable]::Synchronized(@{ Cancel = $true })
+    $app = New-ProgFakeApp -Name 'UC Prog Tool' -Key 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' -WingetId 'Fake.UCProg'
+    $r = Invoke-AppUninstall -App $app -Progress $p
+    $r.Status -eq 'Cancelled' -and $r.Message -eq 'prog.cancelled' -and $p['Phase'] -eq 'restorepoint' -and $p['CanCancel'] -eq $true
+}
+
+# Uninstall phase with a harmless stand-in: a throw-away HKCU key plus ping.exe as the "vendor uninstaller".
+$fakeKey = 'HKCU:\Software\UCTestFakeApp-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+New-Item -Path $fakeKey -Force | Out-Null
+$ping = Join-Path ([Environment]::GetFolderPath('System')) 'PING.EXE'
+try {
+    $fake = New-ProgFakeApp -Name 'UC Prog Fake Program' -Key $fakeKey -Un ('"' + $ping + '" -n 5 127.0.0.1')
+    $prog = [hashtable]::Synchronized(@{})
+    $job = Start-ModJob -Progress $prog -Vars @{ App = $fake } -Code 'Invoke-AppUninstall -App $App -Progress $Progress'
+    $okPhase = Wait-Until { $prog['Phase'] -eq 'uninstall' -and $prog['Percent'] -eq -1 }
+    $uninstallFlags = ($prog['CanCancel'] -eq $false) -and ($prog['CanPause'] -eq $false)
+    Start-Sleep -Milliseconds 1300
+    $elapsedText = [string]$prog['Text']
+    $prog['Cancel'] = $true            # must be ignored while the vendor uninstaller runs
+    Start-Sleep -Milliseconds 300
+    $stillRunning = -not $job.Handle.IsCompleted
+    Remove-Item -LiteralPath $fakeKey -Recurse -Force   # "uninstall" done -> verification finds the app gone
+    $ur = @(Receive-ModJob $job -TimeoutSec 60)
+    Check 'uninstall phase: indeterminate, CanCancel=false, CanPause=false' { $okPhase -and $uninstallFlags }
+    Check 'uninstall phase: elapsed text shown, Cancel ignored while the uninstaller runs' { $elapsedText -match '\d\d:\d\d|prog\.uninstalling' -and $stillRunning }
+    Check 'uninstall: result Removed, Percent 100, final CanCancel false' { $ur[0].Status -eq 'Removed' -and $prog['Percent'] -eq 100 -and $prog['CanCancel'] -eq $false }
+} finally { Remove-Item -LiteralPath $fakeKey -Recurse -Force -ErrorAction SilentlyContinue }
+
+# Find-AppLeftovers / Remove-AppLeftovers with progress (private folders under LOCALAPPDATA, DryRun removal).
+$fo = Join-Path $env:LOCALAPPDATA ('UCTestProg-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $fo -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $fo 'a.txt') -Value 'x'
+try {
+    $app = New-ProgFakeApp -Name (Split-Path -Leaf $fo) -Key 'HKCU:\Software\UCNope2'
+    $app.InstallLocation = $fo
+    $prog = [hashtable]::Synchronized(@{})
+    $job = Start-ModJob -Progress $prog -Vars @{ App = $app } -Code '@(Find-AppLeftovers -App $App -InstalledApps @() -Progress $Progress)'
+    $samples = New-Object System.Collections.Generic.List[double]; $sawCancel = $false; $sawPhase = ''
+    while (-not $job.Handle.IsCompleted) {
+        $pc = $prog['Percent']; if ($null -ne $pc) { $samples.Add([double]$pc) }
+        if ($prog['CanCancel'] -eq $true) { $sawCancel = $true }
+        if ($prog['Phase']) { $sawPhase = [string]$prog['Phase'] }
+        Start-Sleep -Milliseconds 3
+    }
+    $items = @(Receive-ModJob $job)
+    Check 'Find-AppLeftovers progress: finds the folder, Percent rises to 100, CanCancel/Phase written' {
+        if (@($items | Where-Object { $_.Path -ieq $fo -and $_.Safe }).Count -ne 1) { throw 'folder not found/safe' }
+        if ($prog['Percent'] -ne 100) { throw "final $($prog['Percent'])" }
+        for ($i = 1; $i -lt $samples.Count; $i++) { if ($samples[$i] -lt $samples[$i - 1]) { throw 'backwards' } }
+        $sawCancel -and $sawPhase -eq 'leftovers'
+    }
+    $prog = [hashtable]::Synchronized(@{ Pause = $true })
+    $job = Start-ModJob -Progress $prog -Vars @{ App = $app } -Code '@(Find-AppLeftovers -App $App -InstalledApps @() -Progress $Progress)'
+    Check 'Find-AppLeftovers pause blocks, resume completes' {
+        if (-not (Wait-Until { $prog['Text'] -eq $pausedText })) { throw 'never paused' }
+        Start-Sleep -Milliseconds 800
+        if ($job.Handle.IsCompleted) { throw 'finished while paused' }
+        $true
+    }
+    $prog['Pause'] = $false
+    $items2 = @(Receive-ModJob $job)
+    Check 'Find-AppLeftovers resume: same items as the unpaused run' { $items2.Count -eq $items.Count }
+    $prog = [hashtable]::Synchronized(@{ Pause = $true })
+    $job = Start-ModJob -Progress $prog -Vars @{ App = $app } -Code '@(Find-AppLeftovers -App $App -InstalledApps @() -Progress $Progress)'
+    [void](Wait-Until { $prog['Text'] -eq $pausedText })
+    $prog['Cancel'] = $true
+    [void](Receive-ModJob $job -TimeoutSec 30)
+    Check 'Find-AppLeftovers cancel (while paused): returns early, Text = cancelled' { $prog['Text'] -eq (T 'prog.cancelled') }
+
+    # Remove-AppLeftovers
+    $fo2 = Join-Path $env:LOCALAPPDATA ('UCTestProg2-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $fo2 -Force | Out-Null
+    try {
+        $its = @(
+            [pscustomobject]@{ Type = 'Folder'; Path = $fo; SizeMB = 0; Safe = $true; Reason = 'app-folder' },
+            [pscustomobject]@{ Type = 'Folder'; Path = $fo2; SizeMB = 0; Safe = $true; Reason = 'app-folder' }
+        )
+        $prog = [hashtable]::Synchronized(@{})
+        $rr = @(Remove-AppLeftovers -Items $its -DryRun -Progress $prog)
+        Check 'Remove-AppLeftovers -DryRun -Progress: WouldRemove for each, Percent 100, nothing deleted' {
+            $rr.Count -eq 2 -and @($rr | Where-Object { $_.Status -ne 'WouldRemove' }).Count -eq 0 -and $prog['Percent'] -eq 100 -and (Test-Path -LiteralPath $fo) -and (Test-Path -LiteralPath $fo2) -and $prog['Phase'] -eq 'leftovers'
+        }
+        $prog = [hashtable]::Synchronized(@{ Pause = $true })
+        $job = Start-ModJob -Progress $prog -Vars @{ Its = $its } -Code '@(Remove-AppLeftovers -Items $Its -DryRun -Progress $Progress)'
+        Check 'Remove-AppLeftovers pause: blocks between items' {
+            if (-not (Wait-Until { $prog['Text'] -eq $pausedText })) { throw 'never paused' }
+            Start-Sleep -Milliseconds 800
+            -not $job.Handle.IsCompleted -and $prog['CanPause'] -eq $true -and $prog['CanCancel'] -eq $true
+        }
+        $prog['Cancel'] = $true
+        $rc = @(Receive-ModJob $job -TimeoutSec 30)
+        Check 'Remove-AppLeftovers cancel: every pending item reported Cancelled, nothing removed' {
+            $rc.Count -eq 2 -and @($rc | Where-Object { $_.Status -ne 'Cancelled' -or $_.Message -ne 'prog.cancelled' }).Count -eq 0 -and (Test-Path -LiteralPath $fo) -and (Test-Path -LiteralPath $fo2)
+        }
+    } finally { Remove-Item -LiteralPath $fo2 -Recurse -Force -ErrorAction SilentlyContinue }
+} finally { Remove-Item -LiteralPath $fo -Recurse -Force -ErrorAction SilentlyContinue }
+
 Remove-Item -LiteralPath $env:UPDATECENTER_DATADIR -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 if ($failures.Count -gt 0) {

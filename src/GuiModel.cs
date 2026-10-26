@@ -46,18 +46,27 @@ namespace Alerion
         void Raise(string name) { var h = PropertyChanged; if (h != null) h(this, new PropertyChangedEventArgs(name)); }
 
         public object Data { get; set; }
+        public object Link { get; set; }           // activity -> the row it belongs to
         public string Key { get; set; }
-        public string Title { get; set; }
-        public string Subtitle { get; set; }
-        public string Right { get; set; }          // size / version column
+        public string Page { get; set; }           // activity -> page to open
+        string title; public string Title { get { return title; } set { title = value; Raise("Title"); } }
+        string subtitle; public string Subtitle { get { return subtitle; } set { subtitle = value; Raise("Subtitle"); } }
+        string right; public string Right { get { return right; } set { right = value; Raise("Right"); } }   // size / version / elapsed
         public double SortValue { get; set; }      // numeric sort (e.g. size)
-        public string Badge { get; set; }
-        public string BadgeBrush { get; set; }
+        string badge; public string Badge { get { return badge; } set { badge = value; Raise("Badge"); } }
+        string badgeBrush; public string BadgeBrush { get { return badgeBrush; } set { badgeBrush = value; Raise("BadgeBrush"); } }
         public string Glyph { get; set; }
         public string GlyphBrush { get; set; }
-        public bool Locked { get; set; }           // protected program / unavailable category
-        public string ActionText { get; set; }
+        bool locked; public bool Locked { get { return locked; } set { locked = value; Raise("Locked"); } }   // protected / unavailable
+        string actionText; public string ActionText { get { return actionText; } set { actionText = value; Raise("ActionText"); } }
         public string Uri { get; set; }
+
+        // live progress (cleanup, scans, uninstall ...)
+        double percent; public double Percent { get { return percent; } set { percent = value; Raise("Percent"); } }
+        bool indeterminate; public bool Indeterminate { get { return indeterminate; } set { if (indeterminate != value) { indeterminate = value; Raise("Indeterminate"); } } }
+        bool showProgress; public bool ShowProgress { get { return showProgress; } set { if (showProgress != value) { showProgress = value; Raise("ShowProgress"); } } }
+        bool canCancel; public bool CanCancel { get { return canCancel; } set { if (canCancel != value) { canCancel = value; Raise("CanCancel"); } } }
+        bool canPause; public bool CanPause { get { return canPause; } set { if (canPause != value) { canPause = value; Raise("CanPause"); } } }
 
         bool selected; public bool Selected { get { return selected; } set { if (selected != value) { selected = value; Raise("Selected"); } } }
         string detail; public string Detail { get { return detail; } set { detail = value; Raise("Detail"); } }
@@ -83,6 +92,7 @@ namespace Alerion
         public string PriorityLabel { get; set; }
         public string PriorityBrush { get; set; }
         public bool IsCheck { get; set; }
+        string actionText; public string ActionText { get { return actionText; } set { actionText = value; Raise("ActionText"); } }   // e.g. "Reinstall"
         public bool Major { get; set; }
         public bool IsUpdate { get; set; }
         public bool CanExclude { get; set; }

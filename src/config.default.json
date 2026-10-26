@@ -16,6 +16,13 @@
   },
   "ScheduleAction": "Install",
   "CheckInterval": "6h",
+  "RunningApps": "Ask",
+  "NvidiaDriverType": "GameReady",
+  "BackupDrivers": true,
+  "CleanupSchedule": "Off",
+  "CleanupIds": ["temp", "wucache", "docache", "thumbs", "wer", "shadercache", "dumps", "appcache"],
+  "MinimizeToTray": false,
+  "PriorityOverrides": {},
   "AutoInstallPriorities": ["Critical", "Important", "Normal"],
   "Sources": {
     "Winget": true,
@@ -27,7 +34,9 @@
     "MicrosoftUpdate": true,
     "Nvidia": true,
     "Defender": true,
-    "Office": true
+    "Office": true,
+    "Oem": true,
+    "SelfUpdaters": true
   },
   "ExcludedPackages": [],
   "WaitWhileBusyMinutes": 240,

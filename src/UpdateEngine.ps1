@@ -27,7 +27,9 @@ param(
     # Only update Update Center itself (Settings > Check for updates).
     [switch]$SelfUpdateOnly,
     # Periodic background check: scan only, notify about NEW updates (no window, no install).
-    [switch]$BackgroundCheck
+    [switch]$BackgroundCheck,
+    # Scheduled cleanup run (config CleanupIds), no updates.
+    [switch]$Cleanup
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,7 +44,7 @@ Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Providers.psm1') -DisableNameChecking -Force
 
 if ($BackgroundCheck) { $Scan = [switch]$true; $Silent = [switch]$true }
-$scanOnly = [bool]($Scan -or $DryRun)
+$scanOnly = [bool]($Scan -or $DryRun -or $Cleanup)
 if (-not (Test-IsAdmin) -and -not $scanOnly) {
     Write-Error 'Update Center must run elevated (use the desktop shortcut or the scheduled task).'
     exit 5
@@ -137,6 +139,13 @@ function Test-Stop {
     return $script:cancelled
 }
 
+function Test-ManualOnly {
+    <# BIOS/firmware, and entries that only open a vendor window (ASUS), never run unattended. #>
+    param($Item)
+    if ([string]$Item.Key -like 'oem|asus|*') { return $true }
+    return ($Item.PSObject.Properties.Name -contains 'ManualOnly') -and [bool]$Item.ManualOnly
+}
+
 function Select-BySource { param([string]$Source) return @($script:selected | Where-Object { $_.Source -eq $Source }) }
 
 try {
@@ -144,8 +153,24 @@ try {
     $logFile = Start-LogFile
     $config = Get-Config
     Import-I18n -Language $config.Language
+    Set-PriorityOverrides -Map $config.PriorityOverrides
+    $studio = ($config.NvidiaDriverType -eq 'Studio')
     $mode = if ($Silent) { 'Silent' } else { $config.Mode }
     if ($Scheduled -and $config.ScheduleAction -eq 'Notify') { $scanOnly = $true }
+    # -------------------------------------------------------------- scheduled cleanup (no updates)
+    if ($Cleanup) {
+        Import-Module (Join-Path $src 'Cleanup.psm1') -DisableNameChecking -Force
+        Write-Log -Message ("Scheduled cleanup: {0}" -f (@($config.CleanupIds) -join ', '))
+        $freed = 0L
+        foreach ($r in @(Invoke-Cleanup -Ids @($config.CleanupIds))) {
+            $freed += [long]$r.Freed
+            Write-Log -Message ("cleanup {0}: {1} ({2} bytes) {3}" -f $r.Id, $r.Status, $r.Freed, $r.Message)
+        }
+        Write-Log -Level OK -Message ("Scheduled cleanup finished, {0:N0} MB freed" -f ($freed / 1MB))
+        if ($freed -ge 50MB) { Show-Toast -Title (T 'toast.cleanupDone' @(('{0:N1} GB' -f ($freed / 1GB)))) -Body (T 'toast.cleanupBody') }
+        throw [System.OperationCanceledException]::new('cleanup only')
+    }
+
     Clear-Cancel
     Reset-Status -Mode $(if ($scanOnly) { 'scan' } else { 'install' })
     $version = Get-AppVersion
@@ -219,12 +244,34 @@ try {
     }
     if ($s.Nvidia) {
         Step 'scan' 10 'Checking NVIDIA graphics driver'
-        try { Add-Candidate (ConvertTo-GpuCandidate (Get-NvidiaUpdateInfo)) }
+        try { Add-Candidate (ConvertTo-GpuCandidate (Get-NvidiaUpdateInfo -Studio:$studio)) }
         catch { Add-Result (New-UpdateResult -Source 'gpu' -Name 'NVIDIA' -Status Failed -Message $_.Exception.Message) }
     }
     if ($s.Defender) { Add-Candidate (Get-DefenderCandidate) }
     if ($s.Store) { Add-Candidate (Get-StoreCandidate) }
     if ($s.Office) { Add-Candidate (Get-OfficeCandidate) }
+    # OEM driver tools (Dell/Lenovo/HP CLIs, ASUS DriverHub) and apps with their own updater (Epic, Discord, Adobe ...)
+    if ($s.Oem -or $s.SelfUpdaters) {
+        Step 'scan' 12 'Checking manufacturer tools and self-updating apps'
+        try {
+            Import-Module (Join-Path $src 'VendorUpdates.psm1') -DisableNameChecking -Force
+            $wingetIds = @($candidates | Where-Object { $_.Source -eq 'winget' } | ForEach-Object { $_.Id })
+            $selfMap = Get-SelfUpdatingAppMap
+            foreach ($v in @(Get-VendorUpdateCandidates -SkipOem:(-not $s.Oem) -SkipSelfUpdaters:(-not $s.SelfUpdaters))) {
+                if (-not $v) { continue }
+                # Chrome/Edge: winget already covers them when it has an update - no duplicate row.
+                if ($v.Key -eq 'selfupdater|chrome' -and $wingetIds -contains 'Google.Chrome') { continue }
+                if ($v.Key -eq 'selfupdater|edge' -and $wingetIds -contains 'Microsoft.Edge') { continue }
+                Add-Candidate $v
+            }
+            # Launchers that update themselves (Epic, Steam, Battle.net, EA, Ubisoft, Discord): winget usually
+            # fails on them, so they are not recommended; the note explains that they update on start.
+            foreach ($c in @($candidates | Where-Object { $_.Source -eq 'winget' -and $selfMap.ContainsKey([string]$_.Id) })) {
+                if ($c.Id -in 'Google.Chrome', 'Microsoft.Edge') { continue }
+                $c.Priority = 'Optional'; $c.Message = [string]$selfMap[[string]$c.Id].Hint
+            }
+        } catch { Write-Log -Level WARN -Message "Vendor/self-updater check failed: $($_.Exception.Message)" }
+    }
     if ($config.SelfUpdate.Enabled -and $config.SelfUpdate.Repo) {
         try { Add-Candidate (Set-UpdateMeta -Item (Invoke-SelfUpdate -Repo $config.SelfUpdate.Repo -DryRun)) }
         catch { Write-Log -Level WARN -Message "Self-update check failed: $($_.Exception.Message)" }
@@ -261,10 +308,10 @@ try {
         $selected = @($available | Where-Object { $keys -contains $_.Key })
     } elseif ($Scheduled) {
         $prio = @($config.AutoInstallPriorities)
-        $selected = @($available | Where-Object { $prio -contains $_.Priority })
+        $selected = @($available | Where-Object { $prio -contains $_.Priority -and -not (Test-ManualOnly $_) })
     } else {
         # "Install recommended": everything except optional (beta / unknown version) packages.
-        $selected = @($available | Where-Object { $_.Priority -ne 'Optional' })
+        $selected = @($available | Where-Object { $_.Priority -ne 'Optional' -and -not (Test-ManualOnly $_) })
     }
     foreach ($c in $selected) { Set-ItemState -Key $c.Key -State 'Pending' }
 
@@ -301,7 +348,7 @@ try {
         }
         $gpuInfo = $null
         if ($gpuSel.Count) {
-            try { $gpuInfo = Get-NvidiaUpdateInfo } catch { Write-Log -Level WARN -Message "NVIDIA lookup failed: $($_.Exception.Message)" }
+            try { $gpuInfo = Get-NvidiaUpdateInfo -Studio:$studio } catch { Write-Log -Level WARN -Message "NVIDIA lookup failed: $($_.Exception.Message)" }
             if ($config.Parallel -and $gpuInfo -and $gpuInfo.NeedsUpdate) {
                 Start-ProviderJob -Name 'gpu-dl' -Script { param($i) Save-NvidiaDriver -Info $i } -Arguments @(, $gpuInfo)
             }
@@ -316,7 +363,7 @@ try {
             Step $c.Source (Next-Percent) ("{0}  {1} -> {2}" -f $c.Name, $c.From, $c.To)
             if ($c.Source -eq 'winget') {
                 $pkg = [pscustomobject]@{ Name = $c.Name; Id = $c.Id; Version = $c.From; Available = $c.To; Source = $c.WingetSource }
-                Complete-Item (Invoke-WingetPackageUpgrade -Package $pkg) $c
+                Complete-Item (Invoke-WingetPackageUpgrade -Package $pkg -CloseRunning:($config.RunningApps -eq 'Close')) $c
             } else {
                 Complete-Item (Invoke-ChocoUpgrade -Package ([pscustomobject]@{ Name = $c.Id; Version = $c.From; Available = $c.To })) $c
             }
@@ -341,6 +388,13 @@ try {
             Complete-Item (Start-OfficeUpdate) $c
         }
 
+        foreach ($c in @(Select-BySource 'oem') + @(Select-BySource 'selfupdater')) {
+            if (Test-Stop) { break }
+            Set-ItemState -Key $c.Key -State 'Running'; Step $c.Source (Next-Percent) ("Updating {0}" -f $c.Name)
+            if (-not (Get-Module VendorUpdates)) { Import-Module (Join-Path $src 'VendorUpdates.psm1') -DisableNameChecking -Force }
+            Complete-Item (Invoke-VendorUpdate -Candidate $c) $c
+        }
+
         if ($wuSel.Count -and -not (Test-Stop)) {
             foreach ($c in $wuSel) { Set-ItemState -Key $c.Key -State 'Running' }
             Step 'windows' (Next-Percent) "Installing $($wuSel.Count) Windows update(s) (this can take a while)"
@@ -363,6 +417,7 @@ try {
                 Step 'gpu' (Next-Percent) "Installing NVIDIA driver $($gpuInfo.Latest) ($($gpuInfo.Size))"
                 $file = if ($config.Parallel) { Receive-ProviderJob -Name 'gpu-dl' -TimeoutMinutes 120 } else { $null }
                 if (-not $file) { $file = Save-NvidiaDriver -Info $gpuInfo }
+                if ($config.BackupDrivers) { Step 'gpu' 85 'Backing up the current graphics driver'; Add-Result (Backup-DisplayDriver) }
                 Complete-Item (Install-NvidiaDriver -Info $gpuInfo -File ([string]@($file)[-1])) $c
             } catch {
                 Complete-Item (New-UpdateResult -Source 'gpu' -Name $c.Name -Status Failed -Message $_.Exception.Message) $c
@@ -421,7 +476,7 @@ finally {
 
     # -------------------------------------------------------------- report (plain GUI scans write none)
     $reportPath = $null
-    $writeReport = ((-not $Scan) -and -not $nothingToDo) -or ($exitCode -ne 0)
+    $writeReport = (((-not $Scan) -and -not $nothingToDo) -or ($exitCode -ne 0)) -and -not $Cleanup
     if ($writeReport) {
         try {
             $items = $results.ToArray()   # @(List) inside a hashtable literal throws in PS 5.1
@@ -488,17 +543,17 @@ finally {
         } catch {
             Write-Log -Level ERROR -Message ("Report failed: {0}`n{1}" -f $_.Exception.Message, $_.ScriptStackTrace)
         }
-    } else {
+    } elseif (-not $Cleanup) {
         Write-Log -Level OK -Message 'Scan finished'
     }
-    Clear-Cancel
+    if (-not $Cleanup) { Clear-Cancel }
     # Still inside the old 'ALERION Update' folder (in-place update from v1.x): finish the move.
     if ((Test-IsAdmin) -and (Test-LegacyInstall) -and -not $scanOnly) {
         $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $cmd = "Start-Sleep -Seconds 15; & '$(Join-Path (Get-AppPaths).AppRoot 'Install.ps1')' -NoLaunch -Quiet"
         Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
     }
-    Complete-Status -ReportPath $(if ($reportPath) { $reportPath.Json } else { $null })
+    if (-not $Cleanup) { Complete-Status -ReportPath $(if ($reportPath) { $reportPath.Json } else { $null }) }
     Remove-OldFiles -Days $(if ($config) { [int]$config.LogRetentionDays } else { 60 })
     $mutex.ReleaseMutex(); $mutex.Dispose()
 }

@@ -2,6 +2,42 @@
 
 Alle relevanten Änderungen an Update Center (bis v1.2.0 „ALERION Update“). Format nach *Keep a Changelog*, Versionierung nach SemVer.
 
+## [1.5.0] - 2026-10-26
+### Added
+- **Code-Signing-Vorbereitung**: signierter Katalog über alle Dateien (`UpdateCenter.cat`) plus Authenticode für
+  Skripte und Setup.exe. Der Release-Workflow signiert automatisch, sobald ein Zertifikat hinterlegt ist (PFX oder
+  Azure Trusted Signing). Selbst-Update nach dem Prinzip „Trust on first use“: Ist die installierte Version signiert,
+  wird jedes Update nur mit demselben Zertifikat und unverändertem Katalog angenommen. Der Online-Installer prüft
+  die Signatur ebenfalls. Anleitung: `docs/CODE_SIGNING.md`.
+- **Neu installieren** für Pakete mit anderer Installationsart (z. B. Epic Online Services): direkt in der
+  Updates-Liste, per winget deinstallieren und neu installieren.
+- **Autostart**: neue Seite wie im Task-Manager. Einträge lassen sich ein- und ausschalten (rückgängig machbar, es
+  wird nichts gelöscht). Sicherheitssoftware, Treiber-Helfer und Eingabedienste sind geschützt.
+- **Hersteller-Treiber**: Dell Command Update, Lenovo System Update und HP Image Assistant über ihre offiziellen
+  Befehlszeilen. ASUS bietet keine; dort erscheint ein Hinweis, der den DriverHub öffnet. BIOS/Firmware wird nie
+  automatisch installiert.
+- **Apps mit eigenem Updater**: Chrome, Edge, Adobe, Epic Games Launcher und Discord werden über ihren eigenen
+  Updater angestoßen. Steam, Battle.net, EA und Ubisoft bekommen einen Hinweis statt eines fehlschlagenden
+  winget-Updates. Office wartet jetzt auf das Ergebnis und meldet die neue Version.
+- **Optionale Windows-Treiber** (wie in den Einstellungen unter „Optionale Updates“) erscheinen als „Optional“.
+- **Live-Fortschritt** mit Balken für Aufräumen, Sicherheits-Scans, Deinstallation und Reste-Entfernung,
+  **abbrechbar**; Aufräumen lässt sich auch **pausieren**. Wo Abbrechen unsicher wäre (DISM-Reparatur,
+  laufender Hersteller-Deinstaller), ist der Knopf gesperrt und erklärt.
+- **Übersicht zeigt alle Module**: laufende Aufgaben mit Fortschritt sowie der Status von Programmen, Autostart,
+  Aufräumen und Sicherheit.
+- **Geöffnete Programme**: vor der Installation fragen, automatisch schließen oder überspringen (Einstellung).
+- **Priorität pro Programm** (Rechtsklick auf ein Update), **Versionshinweise** („Was ist neu?“).
+- **Treiber-Sicherung** vor jedem Grafiktreiber-Update, **NVIDIA Studio-Treiber** als Option.
+- **Geplantes Aufräumen** (wöchentlich/monatlich, nur risikofreie Bereiche) und **Infobereich-Symbol** (optional).
+
+### Changed
+- Module laden **sofort**: zuletzt bekannte Daten erscheinen beim Öffnen, frische Daten folgen im Hintergrund.
+  Reihenfolge: Übersicht zuerst, dann die Seiten von unten nach oben; die gerade geöffnete Seite hat Vorrang.
+- **Verlauf** sitzt jetzt unten in der Seitenleiste über den Einstellungen.
+
+### Fixed
+- Auf der Seite **Sicherheit** ließ sich mit dem Mausrad nicht scrollen.
+
 ## [1.4.0] - 2026-10-26
 ### Added
 - **Programme** (sauber deinstallieren): alle installierten Programme inkl. Store-Apps mit Suche und Sortierung.
