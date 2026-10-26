@@ -21,7 +21,8 @@ jobs:
       - name: Releases only from main
         if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only' && github.ref != 'refs/heads/main'
         shell: powershell
-        run: throw "Releases are built from main only (this run: $env:GITHUB_REF)"
+        run: |
+          throw "Releases are built from main only (this run is $env:GITHUB_REF)"
 
       - uses: actions/checkout@v4
 
