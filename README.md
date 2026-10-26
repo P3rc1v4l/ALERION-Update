@@ -1,6 +1,6 @@
 # Update Center
 
-> Programme, Treiber und Windows aktuell halten – alles auf einmal oder gezielt. · v1.5.0
+> Programme, Treiber und Windows aktuell halten – alles auf einmal oder gezielt. · v1.5.1
 
 Update Center ist ein Update-Tool für Windows 10/11. Es bündelt **winget-Programme** (inkl. Stream Deck,
 OBS, Launcher …), **Chocolatey**, **Microsoft Store**, **Windows Update + Microsoft Update**,
@@ -46,7 +46,7 @@ Voraussetzung: Windows 10 (1809+) oder 11 mit winget (App Installer, ab Werk vor
 | Neustart | Nachfragen (In-App-Dialog) · sofort automatisch · zu fester Uhrzeit · nie – mit geschätzter Dauer, gemessen auf deinem PC |
 | Sichtbar oder unsichtbar | Fenster mit Fortschritt **oder** komplett im Hintergrund + Windows-Benachrichtigung |
 | Komfort | Mit Windows starten, Testbenachrichtigung, App-Update per Knopf, Zeitwähler, Speichern mit Bestätigung |
-| Verlauf | Alle Berichte in der App (sortierbar, volle Texte) + als HTML, Logs 60 Tage |
+| Verlauf | Alle Berichte in der App (sortierbar, volle Texte, markier- und kopierbar) + als HTML, Logs 60 Tage |
 | Übersicht | Laufende Aufgaben aller Module mit Fortschritt, Abbrechen/Pausieren, Status jedes Moduls |
 | Treiber | Sicherung vor jedem Grafiktreiber-Update, NVIDIA Game Ready oder Studio |
 | Schutz der App | Code-Signing-fähig (signierter Katalog, Updates nur mit gleichem Zertifikat), Wiederherstellungspunkt, signaturgeprüfte Treiber, geschützte Ordner, Spiele-Schutz, Abbrechen jederzeit – siehe [SECURITY.md](SECURITY.md) |

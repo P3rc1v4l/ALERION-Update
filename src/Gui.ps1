@@ -82,9 +82,16 @@ foreach ($m in [regex]::Matches((Get-Content (Join-Path $src 'Gui.xaml') -Raw), 
     $el = $window.FindName($m.Groups[1].Value); if ($el) { $ui[$m.Groups[1].Value] = $el }
 }
 $largeLogo = Join-Path $paths.AppRoot 'assets\logo.png'
-if (Test-Path $paths.IconPath) { $window.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([uri]$paths.IconPath) }
-if (Test-Path $paths.LogoPath) { $ui.Logo.Source = [Windows.Media.Imaging.BitmapImage]::new([uri]$paths.LogoPath) }
-if (Test-Path $largeLogo) { $ui.HeroLogo.Source = [Windows.Media.Imaging.BitmapImage]::new([uri]$largeLogo) }
+function Get-ImageNoLock { param([string]$Path)
+    <# Loads an image fully into memory. Loading by URI keeps the file open, which blocks updates of
+       the program folder while the window is open. #>
+    $ms = New-Object System.IO.MemoryStream(, [IO.File]::ReadAllBytes($Path))
+    $img = [Windows.Media.Imaging.BitmapFrame]::Create($ms, [Windows.Media.Imaging.BitmapCreateOptions]::None, [Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+    $img.Freeze(); return $img
+}
+if (Test-Path $paths.IconPath) { $window.Icon = Get-ImageNoLock $paths.IconPath }
+if (Test-Path $paths.LogoPath) { $ui.Logo.Source = Get-ImageNoLock $paths.LogoPath }
+if (Test-Path $largeLogo) { $ui.HeroLogo.Source = Get-ImageNoLock $largeLogo }
 
 $brushConverter = New-Object System.Windows.Media.BrushConverter
 function Get-Brush { param([string]$Hex) $brushConverter.ConvertFromString($Hex) }
@@ -265,7 +272,7 @@ function Set-Texts {
     $ui.SegAll.Content = T 'seg.all'; $ui.SegCritical.Content = T 'prio.Critical'; $ui.SegImportant.Content = T 'prio.Important'
     $ui.SegNormal.Content = T 'prio.Normal'; $ui.SegOptional.Content = T 'prio.Optional'; $ui.SegExcluded.Content = T 'seg.excluded'; $ui.SegInstalled.Content = T 'seg.installed'
     $ui.BtnSelectNone.Content = T 'up.selectNone'; $window.Resources['SelectAllText'] = T 'up.selectAll'
-    $ui.TxtHistoryTitle.Text = T 'nav.history'; $ui.BtnHtml.Content = T 'rep.openHtml'; $ui.BtnLogs.Content = T 'rep.openLogs'
+    $ui.TxtHistoryTitle.Text = T 'nav.history'; $ui.BtnHtml.Content = T 'rep.openHtml'; $ui.BtnLogs.Content = T 'rep.openLogs'; $ui.BtnCopyReport.Content = T 'rep.copy'
     $ui.ColSource.Header = T 'rep.colSource'; $ui.ColName.Header = T 'rep.colName'; $ui.ColFrom.Header = T 'rep.colFrom'
     $ui.ColTo.Header = T 'rep.colTo'; $ui.ColStatus.Header = T 'rep.colStatus'; $ui.ColNote.Header = T 'rep.colNote'
     $ui.TxtSettingsTitle.Text = T 'nav.settings'
@@ -696,6 +703,7 @@ function Show-ReportGrid { param($Report)
     $ui.TxtHistoryEmpty.Text = T 'rep.none'
     $ui.TxtHistoryEmpty.Visibility = if ($Report) { 'Collapsed' } else { 'Visible' }
     $ui.HistoryCard.Visibility = if ($Report) { 'Visible' } else { 'Collapsed' }
+    $ui.BtnCopyReport.IsEnabled = [bool]$Report
     if (-not $Report) { $ui.TxtRepMeta.Text = ''; $ui.Grid.ItemsSource = $null; $ui.BtnHtml.IsEnabled = $false; return }
     $ui.BtnHtml.IsEnabled = [bool]($Report.PSObject.Properties.Name -contains 'HtmlPath' -and (Test-Path $Report.HtmlPath))
     $meta = T 'ov.resultLine' @($Report.Counts.Updated, $Report.Counts.Failed)
@@ -712,6 +720,37 @@ function Show-ReportGrid { param($Report)
         }
     }
     $ui.Grid.ItemsSource = @($list)
+}
+
+function Copy-ReportRows {
+    <# Copies report rows as tab-separated text (pastes cleanly into chats, mails, Excel). #>
+    param([object[]]$Items, [switch]$WithHeader)
+    $items = @($Items | Where-Object { $_ })
+    if (-not $items.Count) { Show-AppToast (T 'rep.copyNone') 'info'; return }
+    $lines = New-Object System.Collections.Generic.List[string]
+    if ($WithHeader -and $script:shownReport) {
+        $r = $script:shownReport
+        $lines.Add(('Update Center {0} - {1} - {2}' -f $r.AppVersion, ([datetime]::Parse($r.EndedAt)).ToString('dd.MM.yyyy HH:mm'), (T 'ov.resultLine' @($r.Counts.Updated, $r.Counts.Failed))))
+    }
+    $lines.Add((@((T 'rep.colSource'), (T 'rep.colName'), (T 'rep.colFrom'), (T 'rep.colTo'), (T 'rep.colStatus'), (T 'rep.colNote')) -join "`t"))
+    foreach ($i in $items) { $lines.Add((@($i.Source, $i.Name, $i.From, $i.To, $i.StatusText, $i.Note) | ForEach-Object { ([string]$_) -replace '[\t\r\n]+', ' ' }) -join "`t") }
+    [System.Windows.Clipboard]::SetText(($lines -join "`r`n"))
+    Show-AppToast (T 'rep.copied' @($items.Count))
+}
+
+function Show-ReportMenu {
+    $menu = New-Object System.Windows.Controls.ContextMenu
+    foreach ($e in @(@('rep.copySelected', 'sel'), @('rep.copyAll', 'all'), @('rep.copyFailed', 'failed'))) {
+        $mi = New-Object System.Windows.Controls.MenuItem; $mi.Header = T $e[0]; $mi.Tag = $e[1]
+        $mi.Add_Click({ param($s)
+            switch ([string]$s.Tag) {
+                'sel'    { Copy-ReportRows @($ui.Grid.SelectedItems) }
+                'all'    { Copy-ReportRows @($ui.Grid.ItemsSource) -WithHeader }
+                'failed' { Copy-ReportRows @($ui.Grid.ItemsSource | Where-Object { $_.StatusRank -eq 0 }) -WithHeader }
+            } })
+        [void]$menu.Items.Add($mi)
+    }
+    $menu.PlacementTarget = $ui.Grid; $menu.IsOpen = $true
 }
 
 # ------------------------------------------------------------------ engine control
@@ -1484,7 +1523,7 @@ function Update-Tray {
     if (-not $script:tray) {
         Add-Type -AssemblyName System.Windows.Forms, System.Drawing
         $script:tray = New-Object System.Windows.Forms.NotifyIcon
-        if (Test-Path $paths.IconPath) { $script:tray.Icon = New-Object System.Drawing.Icon($paths.IconPath) }
+        if (Test-Path $paths.IconPath) { $script:tray.Icon = New-Object System.Drawing.Icon((New-Object System.IO.MemoryStream(, [IO.File]::ReadAllBytes($paths.IconPath)))) }
         $menu = New-Object System.Windows.Forms.ContextMenuStrip
         [void]$menu.Items.Add((T 'tray.open'), $null, { Show-FromTray })
         [void]$menu.Items.Add((T 'ov.scan'), $null, { Show-FromTray; Start-Engine -Mode scan })
@@ -1627,6 +1666,11 @@ $ui.ExclChips.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickE
 $ui.BtnExclAdd.Add_Click({ $id = $ui.TxtExclAdd.Text.Trim(); if ($id) { Set-Exclusion -Id $id -Exclude $true; $ui.TxtExclAdd.Text = '' } })
 $ui.TxtExclAdd.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { $ui.BtnExclAdd.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) } })
 $ui.ReportList.Add_SelectionChanged({ if ($ui.ReportList.SelectedItem) { $script:shownReport = $ui.ReportList.SelectedItem.Report; Show-ReportGrid $script:shownReport } })
+$ui.BtnCopyReport.Add_Click({ Copy-ReportRows @($ui.Grid.ItemsSource) -WithHeader })
+# right-click in the report: copy selection / everything / only failures (text cells are also selectable with the mouse)
+$ui.Grid.Add_PreviewMouseRightButtonUp({ param($s, $e)
+    if ($e.OriginalSource -is [System.Windows.Controls.TextBox] -and $e.OriginalSource.SelectionLength -gt 0) { return }   # keep the text box's own Copy menu
+    Show-ReportMenu; $e.Handled = $true })
 $ui.BtnLogs.Add_Click({ Start-Process explorer.exe -ArgumentList "`"$($paths.LogDir)`"" })
 $ui.BtnHtml.Add_Click({ $r = $script:shownReport; if ($r -and (Test-Path $r.HtmlPath)) { Start-Process $r.HtmlPath } })
 

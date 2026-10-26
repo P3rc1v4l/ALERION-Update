@@ -2,6 +2,18 @@
 
 Alle relevanten Änderungen an Update Center (bis v1.2.0 „ALERION Update“). Format nach *Keep a Changelog*, Versionierung nach SemVer.
 
+## [1.5.1] - 2026-10-26
+### Fixed
+- **App-Update schlug fehl** („Der Prozess kann nicht auf die Datei … icon.ico zugreifen“): Das Selbst-Update kopierte
+  in den laufenden Programmordner, während das geöffnete Fenster das Symbol gesperrt hielt. Jetzt wird das geprüfte
+  Paket an seinen eigenen Installer übergeben: Er wartet das Ende des Laufs ab, schließt die App, ersetzt alle Dateien
+  und öffnet sie wieder. Zusätzlich lädt die App Symbol und Logo in den Speicher und sperrt keine Dateien mehr.
+
+### Added
+- **Verlauf kopieren**: Text in allen Spalten lässt sich mit der Maus markieren und kopieren. Knopf „Kopieren“
+  (ganzer Bericht) und Rechtsklick-Menü: markierte Zeilen, ganzer Bericht oder nur Fehler – als Tabelle, die sich
+  sauber in Chats, Mails oder Excel einfügen lässt.
+
 ## [1.5.0] - 2026-10-26
 ### Added
 - **Code-Signing-Vorbereitung**: signierter Katalog über alle Dateien (`UpdateCenter.cat`) plus Authenticode für

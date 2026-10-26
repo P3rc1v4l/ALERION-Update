@@ -16,10 +16,10 @@
 - Export/Import der Einstellungen
 
 ## ✅ Recently Shipped
+- v1.5.1: App-Update zuverlässig, Verlauf kopierbar
 - v1.5.0: Autostart-Manager, Live-Fortschritt mit Abbrechen/Pausieren
 - v1.5.0: Hersteller-Treiber, Apps mit eigenem Updater, Neu installieren
 - v1.4.0: Programme sauber deinstallieren, Aufräumen, Sicherheits-Check
-- v1.3.0: Neuer Name „Update Center“, neues Logo, Setup.exe
 
 ---
 <!--

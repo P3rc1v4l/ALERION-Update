@@ -859,29 +859,29 @@ function Invoke-SelfUpdate {
             return New-UpdateResult -Source 'self' -Name 'Update Center' -From $current -To $tag -Status Failed -Message $trust.Reason
         }
     }
-    foreach ($item in @('src', 'assets', 'VERSION', 'Install.ps1', 'Uninstall.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md')) {
-        $srcItem = Join-Path $root $item
-        $dstItem = Join-Path $appRoot $item
-        if (-not (Test-Path $srcItem)) { continue }
-        if (Test-Path $srcItem -PathType Container) {
-            # Copy the folder contents, not the folder itself (avoids src\src nesting).
-            if (-not (Test-Path $dstItem)) { New-Item -ItemType Directory -Path $dstItem -Force | Out-Null }
-            Copy-Item (Join-Path $srcItem '*') -Destination $dstItem -Recurse -Force
-        } else {
-            Copy-Item $srcItem -Destination $dstItem -Force
+    if ($TargetRoot) {
+        # Test hook: copy straight into the given folder.
+        foreach ($item in @('src', 'assets', 'VERSION', 'Install.ps1', 'Uninstall.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md')) {
+            $srcItem = Join-Path $root $item
+            $dstItem = Join-Path $appRoot $item
+            if (-not (Test-Path $srcItem)) { continue }
+            if (Test-Path $srcItem -PathType Container) {
+                if (-not (Test-Path $dstItem)) { New-Item -ItemType Directory -Path $dstItem -Force | Out-Null }
+                Copy-Item (Join-Path $srcItem '*') -Destination $dstItem -Recurse -Force
+            } else { Copy-Item $srcItem -Destination $dstItem -Force }
         }
+        Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+        return New-UpdateResult -Source 'self' -Name 'Update Center' -Id $Repo -From $current -To $tag -Status Updated
     }
-    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Log -Level OK -Message "Self-update applied: $current -> $tag"
-    # Re-run the installer from the new files once this run is over: refreshes shortcuts, icon,
-    # tasks and migrates older installations (detached + delayed so the running engine can finish).
-    $installer = Join-Path $appRoot 'Install.ps1'
-    if (-not $TargetRoot -and (Test-Path $installer)) {
-        $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $cmd = "Start-Sleep -Seconds 20; & '$installer' -NoLaunch -Quiet"
-        Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
-    }
-    return New-UpdateResult -Source 'self' -Name 'Update Center' -Id $Repo -From $current -To $tag -Status Updated
+    # Never copy into the program folder while the app is running (open windows lock files such as
+    # assets\icon.ico). The verified package is handed to ITS installer instead: it waits until this run
+    # has finished, closes the app, replaces all files, re-registers tasks and reopens the app.
+    $installer = Join-Path $root 'Install.ps1'
+    if (-not (Test-Path $installer)) { throw 'Self-update package has no installer' }
+    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$installer`" -NoLaunch -Quiet"
+    Write-Log -Level OK -Message "Self-update $current -> $tag verified, installer started from $root"
+    return New-UpdateResult -Source 'self' -Name 'Update Center' -Id $Repo -From $current -To $tag -Status Updated -Message 'msg.selfUpdateStaged'
 }
 
 # =====================================================================================

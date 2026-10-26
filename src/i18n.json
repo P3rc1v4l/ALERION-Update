@@ -707,7 +707,14 @@
     "msg.driverOptional": "Optionales Treiber-Update (in Windows unter „Optionale Updates“)",
     "msg.officeStaged": "Update bereitgestellt – wird angewendet, sobald Office geschlossen ist",
     "msg.driverBackup": "Treiber-Sicherung",
-    "msg.driverBackupNone": "Kein sicherbarer Grafiktreiber gefunden"
+    "msg.driverBackupNone": "Kein sicherbarer Grafiktreiber gefunden",
+    "rep.copy": "Kopieren",
+    "rep.copied": "{0} Zeilen kopiert – mit Strg+V einfügen",
+    "rep.copyNone": "Nichts zum Kopieren",
+    "rep.copySelected": "Markierte Zeilen kopieren",
+    "rep.copyAll": "Ganzen Bericht kopieren",
+    "rep.copyFailed": "Nur Fehler kopieren",
+    "msg.selfUpdateStaged": "Geprüft – wird installiert, sobald dieser Lauf beendet ist (die App startet dafür kurz neu)"
   },
   "en": {
     "set.save": "Save",
@@ -1417,6 +1424,13 @@
     "msg.driverOptional": "Optional driver update (Windows lists it under “Optional updates”)",
     "msg.officeStaged": "Update staged – applied as soon as Office is closed",
     "msg.driverBackup": "Driver backup",
-    "msg.driverBackupNone": "No graphics driver found to back up"
+    "msg.driverBackupNone": "No graphics driver found to back up",
+    "rep.copy": "Copy",
+    "rep.copied": "{0} rows copied – paste with Ctrl+V",
+    "rep.copyNone": "Nothing to copy",
+    "rep.copySelected": "Copy selected rows",
+    "rep.copyAll": "Copy whole report",
+    "rep.copyFailed": "Copy failures only",
+    "msg.selfUpdateStaged": "Verified – installs as soon as this run has finished (the app restarts briefly)"
   }
 }

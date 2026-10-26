@@ -258,6 +258,19 @@
       <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}"/>
     </Style>
     <Style x:Key="WrapCellMuted" TargetType="TextBlock" BasedOn="{StaticResource WrapCell}"><Setter Property="Foreground" Value="#8A93A1"/></Style>
+    <!-- selectable, copyable cell text (looks like a TextBlock) -->
+    <Style x:Key="SelText" TargetType="TextBox">
+      <Setter Property="IsReadOnly" Value="True"/><Setter Property="IsReadOnlyCaretVisible" Value="False"/><Setter Property="IsTabStop" Value="False"/>
+      <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Foreground" Value="#F5F7FA"/>
+      <Setter Property="TextWrapping" Value="Wrap"/><Setter Property="Margin" Value="0,7"/><Setter Property="Padding" Value="0"/><Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="SelectionBrush" Value="#3D7BFF"/><Setter Property="SelectionOpacity" Value="0.55"/>
+      <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TextBox">
+        <ScrollViewer x:Name="PART_ContentHost" Focusable="False" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled"/>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="SelTextMuted" TargetType="TextBox" BasedOn="{StaticResource SelText}"><Setter Property="Foreground" Value="#A3ABB8"/></Style>
+    <Style x:Key="SelTextMono" TargetType="TextBox" BasedOn="{StaticResource SelText}"><Setter Property="FontFamily" Value="Cascadia Mono, Consolas"/><Setter Property="FontSize" Value="12"/></Style>
     <Style x:Key="MonoCell" TargetType="TextBlock" BasedOn="{StaticResource WrapCell}"><Setter Property="FontFamily" Value="Cascadia Mono, Consolas"/><Setter Property="FontSize" Value="12"/></Style>
     <Style TargetType="DataGridCell">
       <Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="12,0"/><Setter Property="Foreground" Value="#F5F7FA"/>
@@ -912,7 +925,7 @@
           <Grid.ColumnDefinitions><ColumnDefinition Width="196"/><ColumnDefinition/></Grid.ColumnDefinitions>
           <StackPanel Grid.ColumnSpan="2" Margin="0,0,0,18"><TextBlock x:Name="TxtHistoryTitle" Style="{StaticResource Title}"/><TextBlock x:Name="TxtRepMeta" Foreground="#8A93A1" Margin="2,3,0,0"/></StackPanel>
           <StackPanel Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-            <Button x:Name="BtnLogs" Style="{StaticResource Secondary}" Margin="0,0,10,0"/><Button x:Name="BtnHtml" Style="{StaticResource Secondary}"/></StackPanel>
+            <Button x:Name="BtnCopyReport" Style="{StaticResource Secondary}" Margin="0,0,10,0"/><Button x:Name="BtnLogs" Style="{StaticResource Secondary}" Margin="0,0,10,0"/><Button x:Name="BtnHtml" Style="{StaticResource Secondary}"/></StackPanel>
           <Border Grid.Row="1" Style="{StaticResource Card}" Padding="6" Margin="0,0,14,0">
             <ListBox x:Name="ReportList" ScrollViewer.HorizontalScrollBarVisibility="Disabled" Background="Transparent" BorderThickness="0" Foreground="#F5F7FA" HorizontalContentAlignment="Stretch">
               <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem">
@@ -929,15 +942,20 @@
           </Border>
           <TextBlock x:Name="TxtHistoryEmpty" Grid.Row="1" Grid.ColumnSpan="2" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="#8A93A1" Visibility="Collapsed"/>
           <Border x:Name="HistoryCard" Grid.Row="1" Grid.Column="1" Style="{StaticResource Card}" Padding="6">
-            <DataGrid x:Name="Grid">
+            <DataGrid x:Name="Grid" SelectionMode="Extended" ClipboardCopyMode="IncludeHeader">
               <DataGrid.Columns>
-                <DataGridTextColumn x:Name="ColSource" Binding="{Binding Source}" Width="1*" MinWidth="96" ElementStyle="{StaticResource WrapCell}"/>
-                <DataGridTextColumn x:Name="ColName" Binding="{Binding Name}" Width="2.9*" MinWidth="168" ElementStyle="{StaticResource WrapCell}"/>
-                <DataGridTextColumn x:Name="ColFrom" Binding="{Binding From}" Width="0.7*" MinWidth="70" ElementStyle="{StaticResource MonoCell}"/>
-                <DataGridTextColumn x:Name="ColTo" Binding="{Binding To}" Width="0.7*" MinWidth="70" ElementStyle="{StaticResource MonoCell}"/>
-                <DataGridTemplateColumn x:Name="ColStatus" Width="0.9*" MinWidth="124" SortMemberPath="StatusRank"><DataGridTemplateColumn.CellTemplate><DataTemplate>
+                <DataGridTemplateColumn x:Name="ColSource" Width="1*" MinWidth="96" SortMemberPath="Source" ClipboardContentBinding="{Binding Source}"><DataGridTemplateColumn.CellTemplate><DataTemplate>
+                  <TextBox Text="{Binding Source, Mode=OneWay}" Style="{StaticResource SelText}"/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+                <DataGridTemplateColumn x:Name="ColName" Width="2.9*" MinWidth="168" SortMemberPath="Name" ClipboardContentBinding="{Binding Name}"><DataGridTemplateColumn.CellTemplate><DataTemplate>
+                  <TextBox Text="{Binding Name, Mode=OneWay}" Style="{StaticResource SelText}"/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+                <DataGridTemplateColumn x:Name="ColFrom" Width="0.7*" MinWidth="70" SortMemberPath="From" ClipboardContentBinding="{Binding From}"><DataGridTemplateColumn.CellTemplate><DataTemplate>
+                  <TextBox Text="{Binding From, Mode=OneWay}" Style="{StaticResource SelTextMono}"/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+                <DataGridTemplateColumn x:Name="ColTo" Width="0.7*" MinWidth="70" SortMemberPath="To" ClipboardContentBinding="{Binding To}"><DataGridTemplateColumn.CellTemplate><DataTemplate>
+                  <TextBox Text="{Binding To, Mode=OneWay}" Style="{StaticResource SelTextMono}"/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
+                <DataGridTemplateColumn x:Name="ColStatus" Width="0.9*" MinWidth="124" SortMemberPath="StatusRank" ClipboardContentBinding="{Binding StatusText}"><DataGridTemplateColumn.CellTemplate><DataTemplate>
                   <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusColor}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,7"/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
-                <DataGridTextColumn x:Name="ColNote" Binding="{Binding Note}" Width="2.2*" MinWidth="100" ElementStyle="{StaticResource WrapCellMuted}"/>
+                <DataGridTemplateColumn x:Name="ColNote" Width="2.2*" MinWidth="100" SortMemberPath="Note" ClipboardContentBinding="{Binding Note}"><DataGridTemplateColumn.CellTemplate><DataTemplate>
+                  <TextBox Text="{Binding Note, Mode=OneWay}" Style="{StaticResource SelTextMuted}"/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
               </DataGrid.Columns>
             </DataGrid>
           </Border>
