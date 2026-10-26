@@ -24,7 +24,7 @@ jobs:
         run: |
           throw "Releases are built from main only (this run is $env:GITHUB_REF)"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Smoke test (Windows PowerShell 5.1)
         shell: powershell
