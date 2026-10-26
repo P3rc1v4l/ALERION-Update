@@ -23,7 +23,8 @@ $script:CategoryMeta = [ordered]@{
 
 # ---------------------------------------------------------------- progress helpers
 # Contract: the caller passes a synchronized hashtable. We write Percent (0..100, -1 = indeterminate), Text,
-# CanCancel, CanPause, Phase; we read Cancel and Pause. $null = no progress, behave as before.
+# CanCancel, CanPause, Phase; we read Cancel and Pause. Optional key Log: a synchronized ArrayList that receives short localized
+# log lines ("HH:mm:ss  text", capped at 500 lines) via Add-ProgLog. $null = no progress, behave as before.
 function Set-Prog {
     param($Progress, $Percent = $null, $Text = $null, $CanCancel = $null, $CanPause = $null, $Phase = $null)
     if ($null -eq $Progress) { return }
@@ -33,6 +34,57 @@ function Set-Prog {
         if ($null -ne $CanCancel) { $Progress['CanCancel'] = [bool]$CanCancel }
         if ($null -ne $CanPause) { $Progress['CanPause'] = [bool]$CanPause }
         if ($null -ne $Phase) { $Progress['Phase'] = [string]$Phase }
+    } catch { }
+}
+
+$script:ProgLogMax = 500
+
+function Add-ProgLog {
+    <# Appends "HH:mm:ss  <T key args>" to $Progress['Log'] (if the caller supplied one) and trims it to 500 lines.
+       Never throws: a logging problem must not break a cleanup. #>
+    param($Progress, [string]$Key, [object[]]$Args2 = @())
+    if ($null -eq $Progress) { return }
+    try {
+        $log = $Progress['Log']
+        if ($null -eq $log) { return }
+        $line = '{0:HH:mm:ss}  {1}' -f (Get-Date), (T $Key $Args2)
+        [void]$log.Add($line)
+        while ($log.Count -gt $script:ProgLogMax) { $log.RemoveAt(0) }
+    } catch { }
+}
+
+function Write-CleanupResultLog {
+    <# One line per finished category: freed X / freed X with N locked files skipped / skipped (reason) / failed. Never throws. #>
+    param($Progress, $Result)
+    if ($null -eq $Progress) { return }
+    try {
+        $cat = T ('cl.' + $Result.Id)
+        $freed = Format-ProgBytes ([double]$Result.FreedBytes)
+        $msg = [string]$Result.Message
+        $locked = 0
+        if ($msg -match 'locked=(\d+)') { $locked = [int]$Matches[1] }
+        switch ($Result.Status) {
+            'Cleaned'    { Add-ProgLog $Progress 'log.cl.freed' @($cat, $freed) }
+            'Partial'    {
+                if ($locked -gt 0) { Add-ProgLog $Progress 'log.cl.freedLocked' @($cat, $freed, $locked) }
+                else { Add-ProgLog $Progress 'log.cl.freed' @($cat, $freed) }
+                if ($msg -match 'skipped-running=(\S+)') { Add-ProgLog $Progress 'log.cl.browserOpen' @($Matches[1]) }
+            }
+            'WouldClean' { Add-ProgLog $Progress 'log.cl.would' @($cat, $freed) }
+            'Skipped'    {
+                $why = switch -Regex ($msg) {
+                    '^needs-admin'     { T 'log.cl.why.admin'; break }
+                    '^browser-running' { T 'log.cl.why.browser'; break }
+                    '^not-installed'   { T 'log.cl.why.notInstalled'; break }
+                    '^update-busy'     { T 'log.cl.why.updateBusy'; break }
+                    '^reboot-pending'  { T 'log.cl.why.reboot'; break }
+                    default            { $msg }
+                }
+                Add-ProgLog $Progress 'log.cl.skipped' @($cat, $why)
+            }
+            'Cancelled'  { Add-ProgLog $Progress 'log.cl.cancelled' @($cat, $freed) }
+            default      { Add-ProgLog $Progress 'log.cl.failed' @($cat, $msg) }
+        }
     } catch { }
 }
 
@@ -515,18 +567,25 @@ function Invoke-Cleanup {
             Set-Prog $Progress -CanCancel $true -CanPause $true -Phase 'clean'
             Write-CleanupProgress $Progress $ctx
         }
+        Add-ProgLog $Progress 'log.cl.start' @((T ('cl.' + $id)))
         try {
             $r = Invoke-OneCleanup -Id $id -DryRun:$DryRun -Progress $Progress -Ctx $ctx
             Write-Log -Level INFO -Message "Cleanup $id : $($r.Status) freed=$($r.FreedBytes) $($r.Message)"
+            Write-CleanupResultLog $Progress $r
             $out.Add($r)
             if ($r.Status -eq 'Cancelled') { $cancelled = $true }
         } catch {
             Write-Log -Level ERROR -Message "Cleanup $id failed: $($_.Exception.Message)"
-            $out.Add((New-CleanupResult $id 'Failed' 0 $_.Exception.Message))
+            $fr = New-CleanupResult $id 'Failed' 0 $_.Exception.Message
+            Write-CleanupResultLog $Progress $fr
+            $out.Add($fr)
         }
         if ($ctx) { $ctx.Base += $ctx.CurW }
     }
     if ($Progress) {
+        $sum = [double]0
+        foreach ($o in $out) { if ($o.Status -in 'Cleaned', 'Partial', 'WouldClean') { $sum += [double]$o.FreedBytes } }
+        Add-ProgLog $Progress $(if ($cancelled) { 'log.cl.doneCancelled' } else { 'log.cl.done' }) @((Format-ProgBytes $sum))
         Set-Prog $Progress -CanCancel $false -CanPause $false
         if ($cancelled) { Set-Prog $Progress -Text (T 'prog.cancelled') }
         else { Set-Prog $Progress -Percent 100 -Text (T 'prog.done') }

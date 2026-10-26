@@ -17,7 +17,12 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit 0
 }
 
-$targets = @((Join-Path $env:ProgramFiles 'Update Center'), (Join-Path $env:ProgramFiles 'ALERION Update'))
+$targets = @((Join-Path $env:ProgramFiles 'Update Center'), (Join-Path $env:ProgramFiles 'ALERION Update'), (Join-Path $env:ProgramFiles 'UpdateCenter-Update'))
+# Stop the app and any running update first, otherwise its files cannot be deleted.
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $cl = $_.CommandLine; $cl -and $_.ProcessId -ne $PID -and @($targets | Where-Object { $cl -like "*$_\src\*" }).Count } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 1
 foreach ($tp in @('\UpdateCenter\', '\ALERION\')) {
     Get-ScheduledTask -TaskPath $tp -ErrorAction SilentlyContinue |
         Where-Object { $_.TaskName -like 'Update Center*' -or $_.TaskName -like 'ALERION*' } |
@@ -37,6 +42,6 @@ if (-not $KeepData) {
 
 # The script may live inside the folder it deletes: remove it from a detached process.
 $list = ($targets | ForEach-Object { "'$_'" }) -join ','
-$cmd = "Start-Sleep -Seconds 2; foreach (`$t in @($list)) { Remove-Item -LiteralPath `$t -Recurse -Force -ErrorAction SilentlyContinue }"
+$cmd = "Start-Sleep -Seconds 2; foreach (`$t in @($list)) { for (`$i = 0; `$i -lt 5 -and (Test-Path -LiteralPath `$t); `$i++) { Remove-Item -LiteralPath `$t -Recurse -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath `$t) { Start-Sleep -Seconds 2 } } }"
 Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -WindowStyle Hidden -ArgumentList "-NoProfile -Command $cmd"
-Write-Host 'Update Center removed.' -ForegroundColor Green
+Write-Host 'Update Center removed (the program folder is deleted in a few seconds).' -ForegroundColor Green

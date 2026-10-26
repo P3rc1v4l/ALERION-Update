@@ -14,7 +14,8 @@ $script:MaxLeftoverBytes = [int64]2GB
 # =====================================================================================
 # Progress helpers
 # Contract: the caller passes a synchronized hashtable. We write Percent (0..100, -1 = indeterminate), Text, CanCancel,
-# CanPause, Phase; we read Cancel and Pause. $null = no progress, behave as before.
+# CanPause, Phase; we read Cancel and Pause. Optional key Log: a synchronized ArrayList that receives short localized
+# log lines ("HH:mm:ss  text", capped at 500 lines) via Add-ProgLog. $null = no progress, behave as before.
 # =====================================================================================
 
 function Set-Prog {
@@ -26,6 +27,38 @@ function Set-Prog {
         if ($null -ne $CanCancel) { $Progress['CanCancel'] = [bool]$CanCancel }
         if ($null -ne $CanPause) { $Progress['CanPause'] = [bool]$CanPause }
         if ($null -ne $Phase) { $Progress['Phase'] = [string]$Phase }
+    } catch { }
+}
+
+$script:ProgLogMax = 500
+
+function Add-ProgLog {
+    <# Appends "HH:mm:ss  <T key args>" to $Progress['Log'] (if the caller supplied one) and trims it to 500 lines.
+       Never throws: a logging problem must not break an uninstall. #>
+    param($Progress, [string]$Key, [object[]]$Args2 = @())
+    if ($null -eq $Progress) { return }
+    try {
+        $log = $Progress['Log']
+        if ($null -eq $log) { return }
+        $line = '{0:HH:mm:ss}  {1}' -f (Get-Date), (T $Key $Args2)
+        [void]$log.Add($line)
+        while ($log.Count -gt $script:ProgLogMax) { $log.RemoveAt(0) }
+    } catch { }
+}
+
+function Write-LeftoverResultLog {
+    <# One line for a finished leftover removal result (Removed / Failed / Skipped). Never throws. #>
+    param($Progress, $Result)
+    if ($null -eq $Progress -or $null -eq $Result) { return }
+    try {
+        $path = [string]$Result.Path
+        if ($path.Length -gt 140) { $path = '...' + $path.Substring($path.Length - 137) }
+        switch ($Result.Status) {
+            'Removed'     { Add-ProgLog $Progress 'log.un.lo.removed' @($path) }
+            'WouldRemove' { Add-ProgLog $Progress 'log.un.lo.would' @($path) }
+            'Failed'      { Add-ProgLog $Progress 'log.un.lo.failed' @($path, [string]$Result.Message) }
+            'Skipped'     { Add-ProgLog $Progress 'log.un.lo.skipped' @($path, [string]$Result.Message) }
+        }
     } catch { }
 }
 
@@ -509,6 +542,7 @@ function Invoke-AppUninstall {
     }
 
     Use-WorkDirs
+    Add-ProgLog $Progress 'log.un.start' @($name, $plan.Count)
     $reboot = $false
     $last = ''
     $lastCode = $null
@@ -516,23 +550,25 @@ function Invoke-AppUninstall {
     # Phases: restorepoint (optional, cancel allowed) -> uninstall (vendor uninstaller: not cancellable) -> verify -> done.
     if ($Progress) {
         Set-Prog $Progress -Percent 0 -CanCancel $true -CanPause $false -Phase 'restorepoint' -Text (T 'prog.startUninstall' @($name))
-        if (Test-ProgCancel $Progress) { return New-UninstallResult -App $App -Status 'Cancelled' -Message 'prog.cancelled' }
+        if (Test-ProgCancel $Progress) { Add-ProgLog $Progress 'log.un.cancelled' @($name); return New-UninstallResult -App $App -Status 'Cancelled' -Message 'prog.cancelled' }
     }
     if ($RestorePoint) {
         Set-Prog $Progress -Percent -1 -Phase 'restorepoint' -Text (T 'prog.restorepoint')
-        try { [void](New-RestorePoint) } catch { Write-Log -Level WARN -Message "Restore point failed: $($_.Exception.Message)" }
+        Add-ProgLog $Progress 'log.un.restore'
+        try { [void](New-RestorePoint); Add-ProgLog $Progress 'log.un.restoreDone' } catch { Write-Log -Level WARN -Message "Restore point failed: $($_.Exception.Message)"; Add-ProgLog $Progress 'log.un.restoreFail' }
         # Checkpoint-Computer itself cannot be interrupted; a cancel that arrived meanwhile stops before the uninstall.
-        if (Test-ProgCancel $Progress) { return New-UninstallResult -App $App -Status 'Cancelled' -Message 'prog.cancelled' }
+        if (Test-ProgCancel $Progress) { Add-ProgLog $Progress 'log.un.cancelled' @($name); return New-UninstallResult -App $App -Status 'Cancelled' -Message 'prog.cancelled' }
     }
     foreach ($step in $plan) {
         if ($stepNo -gt 0 -and $Progress) {
             # Between fallback methods nothing is running: cancelling is safe again.
             Set-Prog $Progress -CanCancel $true -Phase 'uninstall' -Text (T 'prog.nextMethod' @($name))
-            if (Test-ProgCancel $Progress) { return New-UninstallResult -App $App -Status 'Cancelled' -ExitCode $lastCode -Message 'prog.cancelled' -RebootRequired $reboot }
+            if (Test-ProgCancel $Progress) { Add-ProgLog $Progress 'log.un.cancelled' @($name); return New-UninstallResult -App $App -Status 'Cancelled' -ExitCode $lastCode -Message 'prog.cancelled' -RebootRequired $reboot }
         }
         $stepNo++
         Set-Prog $Progress -Percent -1 -CanCancel $false -CanPause $false -Phase 'uninstall' -Text (T 'prog.uninstalling' @($name))
         Write-Log -Message "Uninstall '$name' via $($step.Text)"
+        Add-ProgLog $Progress 'log.un.method' @($stepNo, $plan.Count, [string]$step.Text)
         $code = $null
         $note = ''
         try {
@@ -541,19 +577,19 @@ function Invoke-AppUninstall {
                     $winget = Get-WingetPath
                     if (-not $winget) { $last = 'winget-missing'; continue }
                     $r = Invoke-Process -FilePath $winget -ArgumentList @('uninstall', '--id', $step.Value, '--exact', '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutMinutes $script:UninstallTimeoutMinutes
-                    $code = $r.ExitCode; if ($r.TimedOut) { return New-UninstallResult -App $App -Status 'Failed' -ExitCode $code -Message 'timeout' }
+                    $code = $r.ExitCode; if ($r.TimedOut) { Add-ProgLog $Progress 'log.un.timeout' @($stepNo); return New-UninstallResult -App $App -Status 'Failed' -ExitCode $code -Message 'timeout' }
                 }
                 'msi' {
                     $msi = Join-Path $env:SystemRoot 'System32\msiexec.exe'
                     $r = Start-UninstallProcess -Exe $msi -Arguments ('/x ' + $step.Value + ' /qn /norestart') -Hidden -TimeoutMinutes $script:UninstallTimeoutMinutes -Progress $Progress -Label $name
-                    $code = $r.ExitCode; if ($r.TimedOut) { return New-UninstallResult -App $App -Status 'Failed' -ExitCode $code -Message 'timeout' }
+                    $code = $r.ExitCode; if ($r.TimedOut) { Add-ProgLog $Progress 'log.un.timeout' @($stepNo); return New-UninstallResult -App $App -Status 'Failed' -ExitCode $code -Message 'timeout' }
                 }
                 { $_ -in 'quiet', 'string' } {
                     $cl = Split-CommandLine -Command $step.Value
                     if (-not (Test-SafeUninstallExe -Exe $cl.Exe)) { $last = 'unsafe-or-missing-uninstaller'; continue }
                     $hidden = ($step.Type -eq 'quiet')
                     $r = Start-UninstallProcess -Exe $cl.Exe -Arguments $cl.Args -Hidden:$hidden -TimeoutMinutes $script:UninstallTimeoutMinutes -Progress $Progress -Label $name
-                    $code = $r.ExitCode; if ($r.TimedOut) { return New-UninstallResult -App $App -Status 'Failed' -ExitCode $code -Message 'timeout' }
+                    $code = $r.ExitCode; if ($r.TimedOut) { Add-ProgLog $Progress 'log.un.timeout' @($stepNo); return New-UninstallResult -App $App -Status 'Failed' -ExitCode $code -Message 'timeout' }
                     if ($step.Type -eq 'string') { $note = ' (vendor uninstaller, may have shown its own window)' }
                 }
                 'appx' {
@@ -564,23 +600,29 @@ function Invoke-AppUninstall {
         } catch {
             $last = "error: $($_.Exception.Message)"
             Write-Log -Level WARN -Message "Uninstall step $($step.Type) failed for '$name': $($_.Exception.Message)"
+            Add-ProgLog $Progress 'log.un.methodFail' @($stepNo, ($_.Exception.Message -split "`r?`n")[0])
             continue
         }
-        if ($null -eq $code) { continue }
+        if ($null -eq $code) { Add-ProgLog $Progress 'log.un.methodFail' @($stepNo, $last); continue }
         $lastCode = $code
         $info = ConvertTo-ExitInfo -Code ([int]$code)
         if ($info.Reboot) { $reboot = $true }
+        Add-ProgLog $Progress 'log.un.exit' @($stepNo, $code)
         Set-Prog $Progress -Percent -1 -CanCancel $false -CanPause $false -Phase 'verify' -Text (T 'prog.verifying' @($name))
+        Add-ProgLog $Progress 'log.un.verify' @($name)
         if (Wait-AppGone -App $App) {
             Write-Log -Level OK -Message "Uninstalled '$name' via $($step.Type) (exit $code)"
+            Add-ProgLog $Progress 'log.un.removedApp' @($name)
             Set-Prog $Progress -Percent 100 -Text (T 'prog.done')
             return New-UninstallResult -App $App -Status 'Removed' -ExitCode $code -Message ("via $($step.Text)$note") -RebootRequired $reboot
         }
         $last = if ($info.Ok) { 'still-installed' } else { "exit-code-$code ($($step.Type))" }
+        Add-ProgLog $Progress 'log.un.stillThere' @($name, $last)
         # User cancelled the vendor wizard (MSI 1602/1223 style): do not start yet another uninstaller.
         if ([int]$code -in @(1602, 1223)) { $last = 'cancelled'; break }
     }
     Write-Log -Level ERROR -Message "Uninstall of '$name' failed: $last"
+    Add-ProgLog $Progress 'log.un.failed' @($name, $(if ($last) { $last } else { 'no-usable-method' }))
     Set-Prog $Progress -Percent 100 -CanCancel $false -CanPause $false -Text (T 'prog.done')
     return New-UninstallResult -App $App -Status 'Failed' -ExitCode $lastCode -Message $(if ($last) { $last } else { 'no-usable-method' }) -RebootRequired $reboot
 }
@@ -729,6 +771,7 @@ function Find-AppLeftovers {
     # With progress: listing the installed apps takes the first 30 %, the search itself the rest (percent by roots scanned).
     $cancelled = $false
     Set-Prog $Progress -Percent 0 -Text (T 'prog.leftoverSearch') -CanCancel $true -CanPause $true -Phase 'leftovers'
+    Add-ProgLog $Progress 'log.un.lo.search' @($name)
     if ($null -eq $InstalledApps) {
         $InstalledApps = @(Get-InstalledApps -SkipWinget -Progress $Progress -PctFrom 0 -PctTo 30)
         Set-Prog $Progress -CanCancel $true -CanPause $true -Phase 'leftovers'
@@ -809,6 +852,16 @@ function Find-AppLeftovers {
         }
     }
     if ($Progress) {
+        $nSafe = @($items | Where-Object { $_.Safe -eq $true }).Count
+        $shown = 0
+        foreach ($it in $items) {
+            if ($shown -ge 15) { break }
+            $ip = [string]$it.Path
+            if ($ip.Length -gt 140) { $ip = '...' + $ip.Substring($ip.Length - 137) }
+            Add-ProgLog $Progress $(if ($it.Safe -eq $true) { 'log.un.lo.item' } else { 'log.un.lo.itemInfo' }) @([string]$it.Type, $ip)
+            $shown++
+        }
+        Add-ProgLog $Progress $(if ($cancelled) { 'log.un.lo.searchCancelled' } else { 'log.un.lo.searchDone' }) @($items.Count, $nSafe)
         Set-Prog $Progress -CanCancel $false -CanPause $false
         if ($cancelled) { Set-Prog $Progress -Text (T 'prog.cancelled') } else { Set-Prog $Progress -Percent 100 -Text (T 'prog.done') }
     }
@@ -845,9 +898,12 @@ function Remove-AppLeftovers {
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items, [switch]$DryRun, [hashtable]$Progress = $null)
     $results = New-Object System.Collections.Generic.List[object]
     $all = @($Items | Where-Object { $null -ne $_ })
-    $idx = 0; $cancelled = $false
+    $idx = 0; $cancelled = $false; $logged = 0
     Set-Prog $Progress -Percent 0 -Text (T 'prog.leftoverRemove' @(0, $all.Count)) -CanCancel $true -CanPause $true -Phase 'leftovers'
+    Add-ProgLog $Progress 'log.un.lo.removeStart' @($all.Count)
     foreach ($item in @($Items)) {
+        # Log what the previous iteration produced (its many `continue` paths make an end-of-body hook impossible).
+        while ($logged -lt $results.Count) { Write-LeftoverResultLog $Progress $results[$logged]; $logged++ }
         if ($null -eq $item) { continue }
         if ($Progress -and -not $cancelled -and (Wait-ProgPause $Progress)) { $cancelled = $true }
         if ($cancelled) { $results.Add((New-LeftoverResult $item 'Cancelled' 'prog.cancelled')); continue }
@@ -899,7 +955,12 @@ function Remove-AppLeftovers {
             $results.Add((New-LeftoverResult $item 'Failed' $_.Exception.Message))
         }
     }
+    while ($logged -lt $results.Count) { Write-LeftoverResultLog $Progress $results[$logged]; $logged++ }
     if ($Progress) {
+        $nRem = @($results | Where-Object { $_.Status -in 'Removed', 'WouldRemove' }).Count
+        $nFail = @($results | Where-Object { $_.Status -eq 'Failed' }).Count
+        $nSkip = @($results | Where-Object { $_.Status -in 'Skipped', 'Cancelled' }).Count
+        Add-ProgLog $Progress 'log.un.lo.removeDone' @($nRem, $nSkip, $nFail)
         Set-Prog $Progress -CanCancel $false -CanPause $false
         if ($cancelled) { Set-Prog $Progress -Text (T 'prog.cancelled') } else { Set-Prog $Progress -Percent 100 -Text (T 'prog.done') }
     }

@@ -829,7 +829,9 @@ function Invoke-SelfUpdate {
         $u = [uri]$a.browser_download_url
         if ($u.Scheme -ne 'https' -or $u.Host -ne 'github.com') { throw "Untrusted self-update URL: $u" }
     }
-    $work = Join-Path $paths.CacheDir "selfupdate-$tag"
+    # Unpack inside Program Files: it inherits the admin-only ACL, so nothing can swap files between
+    # verification and installation (the ProgramData cache is not a safe place for code).
+    $work = if ($TargetRoot) { Join-Path $paths.CacheDir "selfupdate-$tag" } else { Join-Path $env:ProgramFiles "UpdateCenter-Update\$tag" }
     if (Test-Path $work) { Remove-Item $work -Recurse -Force }
     New-Item -ItemType Directory -Path $work -Force | Out-Null
     $zip = Join-Path $work $zipName
@@ -861,7 +863,7 @@ function Invoke-SelfUpdate {
     }
     if ($TargetRoot) {
         # Test hook: copy straight into the given folder.
-        foreach ($item in @('src', 'assets', 'VERSION', 'Install.ps1', 'Uninstall.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md')) {
+        foreach ($item in @('src', 'assets', 'VERSION', 'Install.ps1', 'Uninstall.ps1', 'LICENSE', 'README.md', 'CHANGELOG.md', 'UpdateCenter.cat')) {
             $srcItem = Join-Path $root $item
             $dstItem = Join-Path $appRoot $item
             if (-not (Test-Path $srcItem)) { continue }

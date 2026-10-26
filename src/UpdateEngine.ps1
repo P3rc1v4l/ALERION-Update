@@ -40,19 +40,41 @@ $ProgressPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }
 
 $src = $PSScriptRoot
-Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
+# Elevated + installed: compile (Add-Type) and unpack in an admin-only temp folder, never in the user's
+# %TEMP% (a normal process of the same user could swap files there between compile and load).
+$appRootDir = Split-Path $PSScriptRoot -Parent
+if ($appRootDir -like "$env:ProgramFiles\*" -and ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $privTemp = Join-Path $appRootDir 'tmp'
+    if (-not (Test-Path $privTemp)) { New-Item -ItemType Directory -Path $privTemp -Force | Out-Null }
+    $env:TEMP = $privTemp; $env:TMP = $privTemp
+}Import-Module (Join-Path $src 'Common.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $src 'Providers.psm1') -DisableNameChecking -Force
 
 if ($BackgroundCheck) { $Scan = [switch]$true; $Silent = [switch]$true }
 $scanOnly = [bool]($Scan -or $DryRun -or $Cleanup)
 if (-not (Test-IsAdmin) -and -not $scanOnly) {
-    Write-Error 'Update Center must run elevated (use the desktop shortcut or the scheduled task).'
+    [Console]::Error.WriteLine('Update Center must run elevated (use the desktop shortcut or the scheduled task).')
     exit 5
 }
 
 # ------------------------------------------------------------------ single instance
-$mutex = New-Object System.Threading.Mutex($false, 'Global\UpdateCenter-Run')
-if (-not $mutex.WaitOne(0)) { Write-Warning 'Another Update Center run is active.'; exit 3 }
+# A lock FILE in the admin-only state folder instead of a global mutex: standard users cannot hold it,
+# and Windows releases it automatically when a run is killed (no "abandoned" state).
+$stateDir = (Get-AppPaths).StateDir
+if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+$lockPath = Join-Path $stateDir 'run.lock'
+$lockWait = (Get-Date).AddMinutes($(if ($Scheduled -or $Cleanup) { 30 } else { 0 }))
+$runLock = $null
+while (-not $runLock) {
+    try { $runLock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
+    catch {
+        if ((Get-Date) -ge $lockWait) {
+            try { Write-Log -Level WARN -Message 'Another Update Center run is active - this run was skipped' } catch { }
+            exit 3
+        }
+        Start-Sleep -Seconds 15
+    }
+}
 
 $results = New-Object System.Collections.Generic.List[object]
 $candidates = New-Object System.Collections.Generic.List[object]
@@ -70,9 +92,11 @@ $nothingToDo = $false
 function Add-Result { param($Item) foreach ($i in @($Item)) { if ($i) { $script:results.Add($i) } } }
 
 function Step {
-    param([string]$Phase, [int]$Percent, [string]$Text)
+    <# $Text goes to the log file (English); the GUI shows the localized $Key text (falls back to $Text). #>
+    param([string]$Phase, [int]$Percent, [string]$Text, [string]$Key = '', [object[]]$KeyArgs = @())
     Write-Log -Message $Text
-    Update-Status -Phase $Phase -Percent $Percent -Current $Text -LogLine $Text
+    $shown = if ($Key) { T $Key $KeyArgs } else { $Text }
+    Update-Status -Phase $Phase -Percent $Percent -Current $shown -LogLine $shown
 }
 
 function Next-Percent {
@@ -140,10 +164,13 @@ function Test-Stop {
 }
 
 function Test-ManualOnly {
-    <# BIOS/firmware, and entries that only open a vendor window (ASUS), never run unattended. #>
+    <# Never unattended: BIOS/firmware (ManualOnly), the DriverHub hint, and vendor setups that open a
+       window (InstallMode 'installer'). Signed INF drivers (pnputil) may run automatically. #>
     param($Item)
-    if ([string]$Item.Key -like 'oem|asus|*') { return $true }
-    return ($Item.PSObject.Properties.Name -contains 'ManualOnly') -and [bool]$Item.ManualOnly
+    if ([string]$Item.Key -eq 'oem|asus|driverhub') { return $true }
+    $names = $Item.PSObject.Properties.Name
+    if ($names -contains 'InstallMode' -and [string]$Item.InstallMode -eq 'installer') { return $true }
+    return ($names -contains 'ManualOnly') -and [bool]$Item.ManualOnly
 }
 
 function Select-BySource { param([string]$Source) return @($script:selected | Where-Object { $_.Source -eq $Source }) }
@@ -174,19 +201,19 @@ try {
     Clear-Cancel
     Reset-Status -Mode $(if ($scanOnly) { 'scan' } else { 'install' })
     $version = Get-AppVersion
-    Step 'start' 1 "Update Center v$version started (scheduled=$Scheduled, scan=$scanOnly, selection=$([bool]$Selection), mode=$mode, parallel=$($config.Parallel))"
+    Step 'start' 1 "Update Center v$version started (scheduled=$Scheduled, scan=$scanOnly, selection=$([bool]$Selection), mode=$mode, parallel=$($config.Parallel))" -Key 'eng.start'
 
     # -------------------------------------------------------------- scheduled-run guards
     if ($Scheduled) {
         $waited = 0
         while ((Test-UserBusy) -and $waited -lt [int]$config.WaitWhileBusyMinutes) {
-            if ($waited -eq 0) { Step 'wait' 1 'Fullscreen app or game detected - waiting until it is closed' }
+            if ($waited -eq 0) { Step 'wait' 1 'Fullscreen app or game detected - waiting until it is closed' -Key 'eng.waitGame' }
             Start-Sleep -Seconds 300; $waited += 5
         }
-        if (Test-UserBusy) { Step 'wait' 1 'Still busy after the wait limit - postponing to the next run'; $exitCode = 4; throw [System.OperationCanceledException]::new('busy') }
+        if (Test-UserBusy) { Step 'wait' 1 'Still busy after the wait limit - postponing to the next run' -Key 'eng.postponeGame'; $exitCode = 4; throw [System.OperationCanceledException]::new('busy') }
         $bat = Get-BatteryState
         if ($bat -and -not $bat.OnAC -and $bat.Percent -lt [int]$config.MinBatteryPercent) {
-            Step 'wait' 1 "Battery at $($bat.Percent)% and not charging - postponing"; $exitCode = 4
+            Step 'wait' 1 "Battery at $($bat.Percent)% and not charging - postponing" -Key 'eng.battery' -KeyArgs @($bat.Percent); $exitCode = 4
             throw [System.OperationCanceledException]::new('battery')
         }
         if ($mode -eq 'Visible' -and -not $scanOnly) {
@@ -196,7 +223,7 @@ try {
     }
 
     # -------------------------------------------------------------- pre-checks
-    Step 'precheck' 2 'Checking internet connection'
+    Step 'precheck' 2 'Checking internet connection' -Key 'eng.internet'
     if (-not (Test-Internet)) { Add-Result (New-UpdateResult -Source 'system' -Name 'msg.internet' -Status Failed -Message 'msg.noInternet'); $exitCode = 2; throw [System.OperationCanceledException]::new('offline') }
     $sysDrive = Get-PSDrive -Name ($env:SystemDrive.TrimEnd(':')) -ErrorAction SilentlyContinue
     if (-not $scanOnly -and $sysDrive -and ($sysDrive.Free / 1GB) -lt [int]$config.MinFreeSpaceGB) {
@@ -204,7 +231,7 @@ try {
     }
 
     if ($SelfUpdateOnly) {
-        Step 'self' 50 'Updating Update Center'
+        Step 'self' 50 'Updating Update Center' -Key 'eng.self'
         try { Add-Result (Set-UpdateMeta -Item (Invoke-SelfUpdate -Repo $config.SelfUpdate.Repo)) }
         catch { Add-Result (New-UpdateResult -Source 'self' -Name 'Update Center' -Status Failed -Message $_.Exception.Message) }
         throw [System.OperationCanceledException]::new('self-update only')
@@ -217,7 +244,7 @@ try {
         Start-ProviderJob -Name 'wu-scan' -Script { param($d, $m, $n, $x) Get-WindowsUpdateCandidates -IncludeDrivers $d -UseMicrosoftUpdate $m -SkipNvidiaDisplay $n -SkipDefinitions $x } -Arguments $wuArgs
     }
     if ($s.Winget) {
-        Step 'scan' 4 'Searching winget for updates'
+        Step 'scan' 4 'Searching winget for updates' -Key 'eng.winget'
         if (-not (Get-WingetPath)) {
             Add-Result (New-UpdateResult -Source 'winget' -Name 'winget' -Status Failed -Message 'msg.wingetMissing')
         } else {
@@ -233,17 +260,17 @@ try {
                 }
                 Add-Candidate $c
             }
-            if ($Scan) { Step 'scan' 6 'Reading installed programs'; $installed = @(Get-InstalledPrograms) }
+            if ($Scan) { Step 'scan' 6 'Reading installed programs' -Key 'eng.installed'; $installed = @(Get-InstalledPrograms) }
         }
     }
     if ($s.Chocolatey -and (Get-ChocoPath)) {
-        Step 'scan' 8 'Searching Chocolatey for updates'
+        Step 'scan' 8 'Searching Chocolatey for updates' -Key 'eng.choco'
         foreach ($p in @(Get-ChocoOutdated)) {
             Add-Candidate (Set-UpdateMeta -Item (New-UpdateResult -Source 'choco' -Name $p.Name -Id $p.Name -From $p.Version -To $p.Available -Status Available))
         }
     }
     if ($s.Nvidia) {
-        Step 'scan' 10 'Checking NVIDIA graphics driver'
+        Step 'scan' 10 'Checking NVIDIA graphics driver' -Key 'eng.nvidia'
         try { Add-Candidate (ConvertTo-GpuCandidate (Get-NvidiaUpdateInfo -Studio:$studio)) }
         catch { Add-Result (New-UpdateResult -Source 'gpu' -Name 'NVIDIA' -Status Failed -Message $_.Exception.Message) }
     }
@@ -252,7 +279,7 @@ try {
     if ($s.Office) { Add-Candidate (Get-OfficeCandidate) }
     # OEM driver tools (Dell/Lenovo/HP CLIs, ASUS DriverHub) and apps with their own updater (Epic, Discord, Adobe ...)
     if ($s.Oem -or $s.SelfUpdaters) {
-        Step 'scan' 12 'Checking manufacturer tools and self-updating apps'
+        Step 'scan' 12 'Checking manufacturer tools and self-updating apps' -Key 'eng.vendor'
         try {
             Import-Module (Join-Path $src 'VendorUpdates.psm1') -DisableNameChecking -Force
             $wingetIds = @($candidates | Where-Object { $_.Source -eq 'winget' } | ForEach-Object { $_.Id })
@@ -277,7 +304,7 @@ try {
         catch { Write-Log -Level WARN -Message "Self-update check failed: $($_.Exception.Message)" }
     }
     if ($s.WindowsUpdate) {
-        Step 'scan' 14 'Searching Windows Update (this can take a minute)'
+        Step 'scan' 14 'Searching Windows Update (this can take a minute)' -Key 'eng.wu'
         try {
             $wu = if ($config.Parallel) { Receive-ProviderJob -Name 'wu-scan' -TimeoutMinutes 30 }
                   else { Get-WindowsUpdateCandidates -IncludeDrivers $wuArgs[0] -UseMicrosoftUpdate $wuArgs[1] -SkipNvidiaDisplay $wuArgs[2] -SkipDefinitions $wuArgs[3] }
@@ -286,7 +313,8 @@ try {
     }
 
     $available = @($candidates | Where-Object { $_.Status -eq 'Available' })
-    Step 'scan' 18 ("{0} update(s) available" -f @($available | Where-Object { -not $_.IsCheck }).Count)
+    $nAvail = @($available | Where-Object { -not $_.IsCheck }).Count
+    Step 'scan' 18 ("{0} update(s) available" -f $nAvail) -Key 'eng.found' -KeyArgs @($nAvail)
     $scanItems = @($candidates.ToArray()) + @($results | Where-Object { $_.Status -eq 'Failed' })
     Write-AtomicFile -Path (Join-Path (Get-AppPaths).StateDir 'last-scan.json') -Content (([pscustomobject]@{
         ScannedAt = (Get-Date).ToString('o'); Items = $scanItems; Installed = $installed
@@ -299,7 +327,7 @@ try {
     } elseif ($Selection) {
         $selPath = [IO.Path]::GetFullPath($Selection)
         # Only accept selection files from the admin-protected state folder.
-        if (-not $selPath.StartsWith((Get-AppPaths).StateDir, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $selPath)) { throw 'Selection file rejected' }
+        if (-not $selPath.StartsWith((Get-AppPaths).StateDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $selPath)) { throw 'Selection file rejected' }
         # PS 5.1 emits a JSON array from ConvertFrom-Json as ONE object - enumerate it explicitly.
         $parsed = Get-Content $selPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $keys = @($parsed | ForEach-Object { [string]$_ })
@@ -333,11 +361,11 @@ try {
         }
     } elseif ($selected.Count -eq 0) {
         $nothingToDo = $true
-        Step 'install' 95 'Nothing selected to install'
+        Step 'install' 95 'Nothing selected to install' -Key 'eng.nothing'
     } else {
         # ========================================================== phase 3: install
         $total = $selected.Count
-        if ($config.RestorePoint) { Step 'restore' 20 'Creating system restore point'; Add-Result (New-RestorePoint) }
+        if ($config.RestorePoint) { Step 'restore' 20 'Creating system restore point' -Key 'eng.restore'; Add-Result (New-RestorePoint) }
 
         # @() matters: PS 5.1 gives a single [pscustomobject] no .Count, so one selected item would be skipped.
         $wuSel = @(Select-BySource 'windows')
@@ -360,7 +388,7 @@ try {
         foreach ($c in $pkgs) {
             if (Test-Stop) { break }
             Set-ItemState -Key $c.Key -State 'Running'
-            Step $c.Source (Next-Percent) ("{0}  {1} -> {2}" -f $c.Name, $c.From, $c.To)
+            Step $c.Source (Next-Percent) ("{0}  {1} -> {2}" -f $c.Name, $c.From, $c.To) -Key 'eng.package' -KeyArgs @($c.Name, $c.From, $c.To)
             if ($c.Source -eq 'winget') {
                 $pkg = [pscustomobject]@{ Name = $c.Name; Id = $c.Id; Version = $c.From; Available = $c.To; Source = $c.WingetSource }
                 Complete-Item (Invoke-WingetPackageUpgrade -Package $pkg -CloseRunning:($config.RunningApps -eq 'Close')) $c
@@ -372,32 +400,32 @@ try {
         $storeBefore = $null
         foreach ($c in (Select-BySource 'defender')) {
             if (Test-Stop) { break }
-            Set-ItemState -Key $c.Key -State 'Running'; Step 'defender' (Next-Percent) 'Updating Microsoft Defender signatures'
+            Set-ItemState -Key $c.Key -State 'Running'; Step 'defender' (Next-Percent) 'Updating Microsoft Defender signatures' -Key 'eng.defender'
             Complete-Item (Update-DefenderSignatures) $c
         }
         foreach ($c in (Select-BySource 'store')) {
             if (Test-Stop) { break }
-            Set-ItemState -Key $c.Key -State 'Running'; Step 'store' (Next-Percent) 'Triggering Microsoft Store updates'
+            Set-ItemState -Key $c.Key -State 'Running'; Step 'store' (Next-Percent) 'Triggering Microsoft Store updates' -Key 'eng.store'
             $storeBefore = Get-StoreSnapshot
             $ok = Start-StoreUpdateScan
             Complete-Item (New-UpdateResult -Source 'store' -Name 'msg.storeApps' -Status $(if ($ok) { 'Triggered' } else { 'Failed' }) -Message $(if ($ok) { 'msg.storeBackground' } else { 'msg.storeScanFailed' })) $c
         }
         foreach ($c in (Select-BySource 'office')) {
             if (Test-Stop) { break }
-            Set-ItemState -Key $c.Key -State 'Running'; Step 'office' (Next-Percent) 'Starting Office update'
+            Set-ItemState -Key $c.Key -State 'Running'; Step 'office' (Next-Percent) 'Starting Office update' -Key 'eng.office'
             Complete-Item (Start-OfficeUpdate) $c
         }
 
         foreach ($c in @(Select-BySource 'oem') + @(Select-BySource 'selfupdater')) {
             if (Test-Stop) { break }
-            Set-ItemState -Key $c.Key -State 'Running'; Step $c.Source (Next-Percent) ("Updating {0}" -f $c.Name)
+            Set-ItemState -Key $c.Key -State 'Running'; Step $c.Source (Next-Percent) ("Updating {0}" -f $c.Name) -Key 'eng.vendorItem' -KeyArgs @($c.Name)
             if (-not (Get-Module VendorUpdates)) { Import-Module (Join-Path $src 'VendorUpdates.psm1') -DisableNameChecking -Force }
             Complete-Item (Invoke-VendorUpdate -Candidate $c) $c
         }
 
         if ($wuSel.Count -and -not (Test-Stop)) {
             foreach ($c in $wuSel) { Set-ItemState -Key $c.Key -State 'Running' }
-            Step 'windows' (Next-Percent) "Installing $($wuSel.Count) Windows update(s) (this can take a while)"
+            Step 'windows' (Next-Percent) "Installing $($wuSel.Count) Windows update(s) (this can take a while)" -Key 'eng.wuInstall' -KeyArgs @($wuSel.Count)
             try {
                 if ($config.Parallel) { [void](Receive-ProviderJob -Name 'wu-dl' -TimeoutMinutes 180) }
                 Complete-Item @(Install-WindowsUpdates -IncludeDrivers $wuArgs[0] -UseMicrosoftUpdate $wuArgs[1] -SkipNvidiaDisplay $wuArgs[2] -SkipDefinitions $wuArgs[3] -OnlyIds $wuIds) $null
@@ -414,10 +442,10 @@ try {
             try {
                 if (-not $gpuInfo -or -not $gpuInfo.NeedsUpdate) { Complete-Item (New-UpdateResult -Source 'gpu' -Name $c.Name -Status Info -Message 'msg.upToDate') $c; continue }
                 if (Test-UserBusy) { Complete-Item (New-UpdateResult -Source 'gpu' -Name $c.Name -To $c.To -Status Skipped -Message 'msg.busyPostponed') $c; continue }
-                Step 'gpu' (Next-Percent) "Installing NVIDIA driver $($gpuInfo.Latest) ($($gpuInfo.Size))"
+                Step 'gpu' (Next-Percent) "Installing NVIDIA driver $($gpuInfo.Latest) ($($gpuInfo.Size))" -Key 'eng.gpu' -KeyArgs @($gpuInfo.Latest, $gpuInfo.Size)
                 $file = if ($config.Parallel) { Receive-ProviderJob -Name 'gpu-dl' -TimeoutMinutes 120 } else { $null }
                 if (-not $file) { $file = Save-NvidiaDriver -Info $gpuInfo }
-                if ($config.BackupDrivers) { Step 'gpu' 85 'Backing up the current graphics driver'; Add-Result (Backup-DisplayDriver) }
+                if ($config.BackupDrivers) { Step 'gpu' 85 'Backing up the current graphics driver' -Key 'eng.gpuBackup'; Add-Result (Backup-DisplayDriver) }
                 Complete-Item (Install-NvidiaDriver -Info $gpuInfo -File ([string]@($file)[-1])) $c
             } catch {
                 Complete-Item (New-UpdateResult -Source 'gpu' -Name $c.Name -Status Failed -Message $_.Exception.Message) $c
@@ -426,13 +454,13 @@ try {
 
         foreach ($c in (Select-BySource 'self')) {
             if (Test-Stop) { break }
-            Set-ItemState -Key $c.Key -State 'Running'; Step 'self' (Next-Percent) 'Updating Update Center'
+            Set-ItemState -Key $c.Key -State 'Running'; Step 'self' (Next-Percent) 'Updating Update Center' -Key 'eng.self'
             try { Complete-Item (Invoke-SelfUpdate -Repo $config.SelfUpdate.Repo) $c }
             catch { Complete-Item (New-UpdateResult -Source 'self' -Name 'Update Center' -Status Failed -Message $_.Exception.Message) $c }
         }
 
         if ($cancelled) {
-            Step 'cancel' 95 'Cancelled by user - remaining items skipped'
+            Step 'cancel' 95 'Cancelled by user - remaining items skipped' -Key 'eng.cancelled'
             $doneKeys = @($results | ForEach-Object { $_.Key })
             foreach ($c in $selected) {
                 if ($doneKeys -notcontains $c.Key) {
@@ -444,7 +472,7 @@ try {
         # verification: still listed by winget with the same version -> failed
         $wingetDone = @($results | Where-Object { $_.Source -eq 'winget' -and $_.Status -eq 'Updated' })
         if ($wingetDone.Count) {
-            Step 'verify' 93 'Verifying winget updates'
+            Step 'verify' 93 'Verifying winget updates' -Key 'eng.verify'
             try {
                 $still = @(Get-WingetUpgrades -IncludeUnknown ([bool]$s.WingetIncludeUnknown))
                 foreach ($r in $wingetDone) {
@@ -555,6 +583,6 @@ finally {
     }
     if (-not $Cleanup) { Complete-Status -ReportPath $(if ($reportPath) { $reportPath.Json } else { $null }) }
     Remove-OldFiles -Days $(if ($config) { [int]$config.LogRetentionDays } else { 60 })
-    $mutex.ReleaseMutex(); $mutex.Dispose()
+    $runLock.Dispose()
 }
 exit $exitCode

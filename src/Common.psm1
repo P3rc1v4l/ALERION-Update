@@ -89,12 +89,26 @@ function Protect-Directory {
     }
     $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier($script:SidAdmins)))
     Set-Acl -Path $Path -AclObject $acl
+    # Children too: a standard user could have pre-created sub folders (they would still own them and
+    # could rewrite their ACL). Take ownership and let everything inherit the protected ACL again.
+    $icacls = Join-Path $env:WINDIR 'System32\icacls.exe'
+    & $icacls $Path /setowner "*$($script:SidAdmins)" /T /C /Q 2>&1 | Out-Null
+    Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | ForEach-Object { & $icacls $_.FullName /reset /T /C /Q 2>&1 | Out-Null }
+}
+
+function Test-AdminOwned {
+    <# True when a path is owned by Administrators or SYSTEM (not by a standard user who planted it). #>
+    param([string]$Path)
+    try { $o = (Get-Acl -LiteralPath $Path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch { return $false }
+    return $o -in @($script:SidAdmins, $script:SidSystem)
 }
 
 function Initialize-DataDir {
     param([switch]$Harden)
     # One-time migration of settings, reports and logs from the v1.x location.
-    if ((Test-IsAdmin) -and $script:DataDir -eq $script:Product.DataDir -and -not (Test-Path $script:DataDir) -and (Test-Path $script:Product.LegacyDataDir)) {
+    # Only from an admin-owned legacy folder: a standard user could otherwise plant a config there.
+    if ((Test-IsAdmin) -and $script:DataDir -eq $script:Product.DataDir -and -not (Test-Path $script:DataDir) -and (Test-Path $script:Product.LegacyDataDir) -and
+        (Test-AdminOwned $script:Product.LegacyDataDir)) {
         New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
         Copy-Item (Join-Path $script:Product.LegacyDataDir '*') -Destination $script:DataDir -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item (Join-Path $script:DataDir 'state\status.json') -Force -ErrorAction SilentlyContinue
@@ -181,6 +195,9 @@ function Test-Config {
     if ($Config.NvidiaDriverType -notin @('GameReady', 'Studio')) { $errors.Add("NvidiaDriverType must be GameReady or Studio") }
     if ($Config.RunningApps -notin @('Ask', 'Close', 'Skip')) { $errors.Add("RunningApps must be Ask, Close or Skip") }
     if ($Config.CleanupSchedule -notin @('Off', 'Weekly', 'Monthly')) { $errors.Add("CleanupSchedule must be Off, Weekly or Monthly") }
+    if ($Config.Appearance.Accent -notin @('Blue', 'Violet', 'Green', 'Orange', 'Pink', 'Teal')) { $errors.Add("Appearance.Accent invalid") }
+    if ([int]$Config.Appearance.Scale -notin @(90, 100, 110, 125)) { $errors.Add("Appearance.Scale must be 90, 100, 110 or 125") }
+    if ($Config.Appearance.StartPage -notin @('Overview', 'Updates', 'Programs', 'Startup', 'Cleanup', 'Security', 'History')) { $errors.Add("Appearance.StartPage invalid") }
     foreach ($p in @($Config.PriorityOverrides.PSObject.Properties)) {
         if ($p.Name -notmatch '^[A-Za-z0-9_.+\-]+$' -or [string]$p.Value -notin (Get-PriorityNames)) { $errors.Add("PriorityOverrides entry invalid: $($p.Name)") }
     }
@@ -207,8 +224,8 @@ function Get-Config {
         $cfg.SchemaVersion = 2
         if (Test-IsAdmin) { try { Save-Config -Config $cfg } catch { Write-Log -Level WARN -Message "Config migration not saved: $($_.Exception.Message)" } }
     }
-    # The GitHub repository was renamed (old name still redirects, but use the new one).
-    if ($cfg.SelfUpdate.Repo -eq 'P3rc1v4l/ALERION-Update') { $cfg.SelfUpdate.Repo = 'P3rc1v4l/UpdateCenter' }
+    # The update source is fixed: code from it runs elevated, so it must never come from a config value.
+    $cfg.SelfUpdate.Repo = 'P3rc1v4l/UpdateCenter'
     $problems = Test-Config $cfg
     if ($problems.Count -gt 0) {
         Write-Log -Level WARN -Message ("Invalid config, falling back to defaults: " + ($problems -join '; '))
@@ -262,7 +279,11 @@ function Remove-OldFiles {
     foreach ($d in @($script:LogDir, $script:ReportDir)) {
         Get-ChildItem $d -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $limit } | Remove-Item -Force -ErrorAction SilentlyContinue
     }
-    Get-ChildItem $script:CacheDir -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-14) } | Remove-Item -Force -ErrorAction SilentlyContinue
+    # Cache files by age - never inside self-update packages: their files carry the release's commit
+    # time and may be "old" while the installer is about to copy them.
+    Get-ChildItem $script:CacheDir -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\selfupdate-[^\\]+\\' -and $_.LastWriteTime -lt (Get-Date).AddDays(-14) } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------- status (read by the GUI)

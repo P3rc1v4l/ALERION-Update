@@ -228,6 +228,72 @@ $cats3 = @(Get-CleanupCategories -Progress $prog)
 Check 'categories progress: Cancel=true returns full-shape list marked cancelled' {
     $cats3.Count -eq $expected.Count -and @($cats3 | Where-Object { $_.Note -ne 'cancelled' }).Count -eq 0
 }
+# ---------------------------------------------------------------- live log
+Write-Host 'Live log' -ForegroundColor Cyan
+$clMod = Get-Module Cleanup
+$fragPath = Join-Path $root 'src\i18n.json'
+$tMod = & $clMod { (Get-Command T).ScriptBlock.Module }
+$frag = Get-Content -LiteralPath $fragPath -Raw -Encoding UTF8 | ConvertFrom-Json
+& $tMod { param($f)
+    $null = T 'prog.done'
+    foreach ($l in 'de', 'en') { foreach ($p in $f.$l.PSObject.Properties) { Add-Member -InputObject $script:I18n.$l -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force } }
+} $frag
+function New-LogProgress { [hashtable]::Synchronized(@{ Log = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList)) }) }
+
+Check 'Add-ProgLog: timestamped line; null / no Log key never throw' {
+    $p = New-LogProgress
+    & $clMod { param($pp) Add-ProgLog $pp 'log.cl.freed' @('Temp', '1 MB') } $p
+    & $clMod { Add-ProgLog $null 'log.cl.freed' @('a', 'b'); Add-ProgLog ([hashtable]::Synchronized(@{})) 'log.cl.freed' @('a', 'b'); Add-ProgLog @{ Log = 5 } 'log.cl.freed' @('a', 'b') }
+    $p['Log'].Count -eq 1 -and $p['Log'][0] -match '^\d\d:\d\d:\d\d  .*Temp' -and $p['Log'][0] -match '1 MB'
+}
+Check 'Add-ProgLog: capped at 500 lines' {
+    $p = New-LogProgress
+    & $clMod { param($pp) 1..530 | ForEach-Object { Add-ProgLog $pp 'log.cl.start' @("cat$_") } } $p
+    $p['Log'].Count -eq 500 -and $p['Log'][0] -match 'cat31\b' -and $p['Log'][499] -match 'cat530\b'
+}
+Check 'Write-CleanupResultLog: freed / locked files skipped / skipped reason / failed / cancelled' {
+    $p = New-LogProgress
+    $mk = { param($s, $b, $m) [pscustomobject]@{ Id = 'temp'; Status = $s; FreedBytes = [long]$b; Message = $m } }
+    $rs = @((& $mk 'Cleaned' 5MB 'files=10 locked=0'), (& $mk 'Partial' 2MB 'files=9 locked=3'), (& $mk 'Skipped' 0 'needs-admin'),
+            (& $mk 'Failed' 0 'access denied'), (& $mk 'Cancelled' 1MB 'prog.cancelled'), (& $mk 'WouldClean' 3MB 'files=4 locked=0'))
+    foreach ($r in $rs) { & $clMod { param($pp, $rr) Write-CleanupResultLog $pp $rr } $p $r }
+    $l = $p['Log']
+    $l.Count -eq 6 -and $l[0] -match '5[.,]0 MB' -and $l[1] -match '2[.,]0 MB' -and $l[1] -match '\b3\b' -and $l[2] -notmatch 'needs-admin' -and
+    $l[3] -match 'access denied' -and $l[4] -match '1[.,]0 MB' -and $l[5] -match '3[.,]0 MB'
+}
+$tr2 = Join-Path $env:UPDATECENTER_DATADIR 'logroot'
+New-Item -ItemType Directory -Path $tr2 -Force | Out-Null
+1..30 | ForEach-Object { [IO.File]::WriteAllText((Join-Path $tr2 "g$_.tmp"), ('y' * 1000)) }
+$env:UPDATECENTER_CLEANUP_TESTROOT = $tr2
+try {
+    $p = New-LogProgress
+    $rd = @(Invoke-Cleanup -Ids 'temp' -DryRun -Progress $p)
+    Check 'Invoke-Cleanup -DryRun -Progress: log has start, would-free and done lines; nothing deleted' {
+        $l = $p['Log']
+        $l.Count -eq 3 -and $l[0] -match [regex]::Escape((T 'cl.temp')) -and $l[1] -match '29[.,]\d KB|30 KB|29 KB' -and $l[2] -match 'KB' -and @(Get-ChildItem $tr2 -File).Count -eq 30
+    }
+    # Real run with one locked file: category line reports the skipped locked file.
+    $fs = [IO.File]::Open((Join-Path $tr2 'g1.tmp'), 'Open', 'ReadWrite', 'None')
+    try {
+        $p = New-LogProgress
+        $rr = @(Invoke-Cleanup -Ids 'temp' -Progress $p)
+    } finally { $fs.Dispose() }
+    Check 'Invoke-Cleanup real run: Partial, freed X and locked count in the log' {
+        $l = $p['Log']
+        $rr[0].Status -eq 'Partial' -and $l.Count -eq 3 -and $l[1] -match '\b1\b' -and $l[1] -match 'KB' -and $l[2] -match 'KB' -and @(Get-ChildItem $tr2 -File).Count -eq 1
+    }
+    $p = New-LogProgress; $p['Cancel'] = $true
+    $rc = @(Invoke-Cleanup -Ids 'temp', 'thumbs' -DryRun -Progress $p)
+    Check 'Invoke-Cleanup cancelled before start: no category line, a cancelled summary' {
+        $rc.Count -eq 2 -and @($rc | Where-Object Status -ne 'Cancelled').Count -eq 0 -and $p['Log'].Count -eq 1
+    }
+    Check 'Invoke-Cleanup without Log key still works (no log, no error)' {
+        $p = [hashtable]::Synchronized(@{})
+        $x = @(Invoke-Cleanup -Ids 'temp' -DryRun -Progress $p)
+        $x.Count -eq 1 -and -not $p.ContainsKey('Log')
+    }
+} finally { $env:UPDATECENTER_CLEANUP_TESTROOT = $tr }
+
 Remove-Item Env:\UPDATECENTER_CLEANUP_TESTROOT -ErrorAction SilentlyContinue
 
 # Real deletion engine with a progress table, on a private folder only.

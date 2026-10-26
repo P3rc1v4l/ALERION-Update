@@ -92,6 +92,7 @@ namespace Alerion
         public string PriorityLabel { get; set; }
         public string PriorityBrush { get; set; }
         public bool IsCheck { get; set; }
+        public bool ManualOnly { get; set; }    // BIOS, vendor windows: only when the user picks it
         string actionText; public string ActionText { get { return actionText; } set { actionText = value; Raise("ActionText"); } }   // e.g. "Reinstall"
         public bool Major { get; set; }
         public bool IsUpdate { get; set; }

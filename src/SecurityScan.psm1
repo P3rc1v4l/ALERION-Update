@@ -8,11 +8,14 @@ Import-Module (Join-Path $PSScriptRoot 'Providers.psm1') -DisableNameChecking
 
 # ---------------------------------------------------------------- progress helpers
 # Contract: caller passes a synchronized hashtable. We write Percent (0..100, -1 = indeterminate), Text, CanCancel,
-# CanPause, Phase; we read Cancel and Pause. $null = no progress, behave as before.
+# CanPause, Phase and Estimated ($true = Percent is a time-based estimate, not measured; the GUI labels it);
+# we read Cancel and Pause. Optional key Log: a synchronized ArrayList that receives short localized log lines
+# ("HH:mm:ss  text", capped at 500 lines) via Add-ProgLog. $null = no progress, behave as before.
 function Set-Prog {
-    param($Progress, $Percent = $null, $Text = $null, $CanCancel = $null, $CanPause = $null, $Phase = $null)
+    param($Progress, $Percent = $null, $Text = $null, $CanCancel = $null, $CanPause = $null, $Phase = $null, $Estimated = $null)
     if ($null -eq $Progress) { return }
     try {
+        if ($null -ne $Estimated) { $Progress['Estimated'] = [bool]$Estimated }
         if ($null -ne $Percent) { $Progress['Percent'] = [double]$Percent }
         if ($null -ne $Text) { $Progress['Text'] = [string]$Text }
         if ($null -ne $CanCancel) { $Progress['CanCancel'] = [bool]$CanCancel }
@@ -95,6 +98,211 @@ function Read-SharedFileBytes {
         try { $buf = New-Object byte[] $fs.Length; $n = $fs.Read($buf, 0, $buf.Length); if ($n -lt $buf.Length) { $b2 = New-Object byte[] $n; if ($n -gt 0) { [Array]::Copy($buf, $b2, $n) }; return $b2 }; return $buf }
         finally { $fs.Dispose() }
     } catch { return (New-Object byte[] 0) }
+}
+
+$script:ProgLogMax = 500
+
+function Add-ProgLog {
+    <# Appends "HH:mm:ss  <T key args>" to $Progress['Log'] (if the caller supplied one) and trims it to 500 lines.
+       Never throws: a logging problem must not break a scan. #>
+    param($Progress, [string]$Key, [object[]]$Args2 = @())
+    if ($null -eq $Progress) { return }
+    try {
+        $log = $Progress['Log']
+        if ($null -eq $log) { return }
+        $line = '{0:HH:mm:ss}  {1}' -f (Get-Date), (T $Key $Args2)
+        [void]$log.Add($line)
+        while ($log.Count -gt $script:ProgLogMax) { $log.RemoveAt(0) }
+    } catch { }
+}
+
+function Format-Remaining {
+    <# Approximate remaining time for people: "3 min", "1 h 20 min" (rounded up, at least 1 min). #>
+    param([double]$Seconds)
+    $m = [int][Math]::Max(1, [Math]::Ceiling($Seconds / 60.0))
+    if ($m -ge 60) { return ('{0} h {1:00} min' -f [int][Math]::Floor($m / 60), ($m % 60)) }
+    return ('{0} min' -f $m)
+}
+
+# ---------------------------------------------------------------- time based estimate (Defender / MRT)
+$script:DefaultScanSeconds = @{ Quick = 240; Full = 3600; Mrt = 300; MrtFull = 1800; Integrity = 900 }
+
+function Get-ScanDurationsPath {
+    return (Join-Path (Get-AppPaths).StateDir 'scan-durations.json')
+}
+
+function Read-ScanDurations {
+    <# Type -> seconds of the last successful scan of that type (hashtable, empty if no/broken file). Never throws. #>
+    $out = @{}
+    try {
+        $p = Get-ScanDurationsPath
+        if (-not (Test-Path -LiteralPath $p)) { return $out }
+        $o = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($prop in $o.PSObject.Properties) {
+            $v = 0.0
+            if ([double]::TryParse([string]$prop.Value, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$v) -and $v -gt 0 -and $v -lt 1e7) { $out[[string]$prop.Name] = $v }
+        }
+    } catch { }
+    return $out
+}
+
+function Save-ScanDuration {
+    <# Remembers the duration of a successful scan: <StateDir>\scan-durations.json {"Quick": 231.4, ...}.
+       Returns $true when written. Never throws. #>
+    param([Parameter(Mandatory)][string]$Type, [double]$Seconds)
+    try {
+        if ($Seconds -le 0 -or [double]::IsNaN($Seconds) -or [double]::IsInfinity($Seconds)) { return $false }
+        $all = Read-ScanDurations
+        $all[$Type] = [Math]::Round($Seconds, 1)
+        $ord = [ordered]@{}
+        foreach ($k in ($all.Keys | Sort-Object)) { $ord[$k] = $all[$k] }
+        $p = Get-ScanDurationsPath
+        $dir = Split-Path -Parent $p
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [IO.File]::WriteAllText($p, (($ord | ConvertTo-Json) + "`r`n"), (New-Object Text.UTF8Encoding($false)))
+        return $true
+    } catch { return $false }
+}
+
+function Get-ExpectedScanSeconds {
+    <# Expected duration of a scan type. Order: our own history file, then (Quick/Full) Defender's last scan from
+       Get-MpComputerStatus, then a fixed default (Quick 4 min, Full 60 min, ...). -MpSource is a hook for tests.
+       Returns Seconds and Source (history | defender | default). Never throws. #>
+    param([Parameter(Mandatory)][string]$Type, [scriptblock]$MpSource = $null)
+    try {
+        $h = Read-ScanDurations
+        if ($h.ContainsKey($Type)) { return [pscustomobject]@{ Seconds = [double]$h[$Type]; Source = 'history' } }
+        if ($Type -in 'Quick', 'Full') {
+            $mp = $null
+            try { $mp = if ($MpSource) { & $MpSource } else { Get-MpComputerStatus -ErrorAction Stop } } catch { }
+            $pre = if ($Type -eq 'Full') { 'FullScan' } else { 'QuickScan' }
+            $a = Get-SafeProp $mp ($pre + 'StartTime') $null
+            $b = Get-SafeProp $mp ($pre + 'EndTime') $null
+            if ($null -ne $a -and $null -ne $b) {
+                $d = ([datetime]$b - [datetime]$a).TotalSeconds
+                if ($d -ge 10 -and $d -le 86400) { return [pscustomobject]@{ Seconds = [double]$d; Source = 'defender' } }
+            }
+        }
+    } catch { }
+    $def = 600.0
+    if ($script:DefaultScanSeconds.ContainsKey($Type)) { $def = [double]$script:DefaultScanSeconds[$Type] }
+    return [pscustomobject]@{ Seconds = $def; Source = 'default' }
+}
+
+function Get-ScanEstimate {
+    <# Percent = min(95, elapsed / expected * 100); remaining = expected - elapsed (floored at 0). Over = elapsed >= expected.
+       Percent -1 when there is no usable expectation. #>
+    param([double]$ElapsedSec, [double]$ExpectedSec)
+    if ($ExpectedSec -le 0) { return [pscustomobject]@{ Percent = -1.0; RemainingSec = -1.0; Over = $false } }
+    $pct = [Math]::Min(95.0, [Math]::Max(0.0, 100.0 * $ElapsedSec / $ExpectedSec))
+    [pscustomobject]@{ Percent = $pct; RemainingSec = [Math]::Max(0.0, $ExpectedSec - $ElapsedSec); Over = ($ElapsedSec -ge $ExpectedSec) }
+}
+
+function Set-EstimatedProg {
+    <# Writes Percent (estimate), Estimated = $true and "<TextKey elapsed> - remaining ca. x min". Never throws. #>
+    param($Progress, [string]$TextKey, [double]$ElapsedSec, [double]$ExpectedSec)
+    if ($null -eq $Progress) { return }
+    try {
+        $e = Get-ScanEstimate -ElapsedSec $ElapsedSec -ExpectedSec $ExpectedSec
+        $text = T $TextKey @((Format-Elapsed ([TimeSpan]::FromSeconds($ElapsedSec))))
+        if ($e.Percent -ge 0) {
+            $tail = if ($e.Over) { T 'prog.estOver' } else { T 'prog.estRemain' @((Format-Remaining $e.RemainingSec)) }
+            Set-Prog $Progress -Percent $e.Percent -Text ($text + ' ' + [char]0xB7 + ' ' + $tail) -Estimated $true
+        } else {
+            Set-Prog $Progress -Text $text
+        }
+    } catch { }
+}
+
+# ---------------------------------------------------------------- live log: Defender detections, periodic status
+function Get-ActionKey {
+    param($Id)
+    switch ([int]$Id) {
+        1 { return 'log.act.clean' }
+        2 { return 'log.act.quarantine' }
+        3 { return 'log.act.remove' }
+        6 { return 'log.act.allow' }
+        9 { return 'log.act.none' }
+        10 { return 'log.act.block' }
+        default { return 'log.act.other' }
+    }
+}
+
+function Get-NewDefenderDetections {
+    <# Detections that started at or after -Since and were not reported before (-Seen is updated in place).
+       Hooks for tests: -DetectionSource / -ThreatSource scriptblocks replace Get-MpThreatDetection / Get-MpThreat.
+       Returns objects with Name, Path, Action. Never throws (returns @() on any problem). #>
+    param([datetime]$Since, [hashtable]$Seen, [scriptblock]$DetectionSource = $null, [scriptblock]$ThreatSource = $null)
+    $out = @()
+    try {
+        $raw = if ($DetectionSource) { @(& $DetectionSource) } else { @(Get-MpThreatDetection -ErrorAction Stop) }
+        $new = @()
+        foreach ($d in $raw) {
+            $t = Get-SafeProp $d 'InitialDetectionTime' $null
+            if ($null -eq $t -or [datetime]$t -lt $Since) { continue }
+            $res = @(Get-SafeProp $d 'Resources' @()) -join ';'
+            $key = [string](Get-SafeProp $d 'DetectionID' ('{0}|{1:o}|{2}' -f (Get-SafeProp $d 'ThreatID' ''), [datetime]$t, $res))
+            if ($Seen.ContainsKey($key)) { continue }
+            $Seen[$key] = $true
+            $new += $d
+        }
+        if ($new.Count -eq 0) { return @() }
+        $names = @{}
+        try {
+            $thr = if ($ThreatSource) { @(& $ThreatSource) } else { @(Get-MpThreat -ErrorAction Stop) }
+            foreach ($x in $thr) { $names[[string](Get-SafeProp $x 'ThreatID' '')] = [string](Get-SafeProp $x 'ThreatName' '') }
+        } catch { }
+        foreach ($d in $new) {
+            $id = [string](Get-SafeProp $d 'ThreatID' '')
+            $name = if ($names.ContainsKey($id) -and $names[$id]) { $names[$id] } else { 'Threat ' + $id }
+            $paths = @(@(Get-SafeProp $d 'Resources' @()) | ForEach-Object { ([string]$_) -replace '^(file|folder|process|regkey|containerfile|webfile):_?', '' } | Select-Object -First 3)
+            $path = ($paths -join '; ')
+            if ($path.Length -gt 200) { $path = $path.Substring(0, 197) + '...' }
+            if (-not $path) { $path = '?' }
+            $out += [pscustomobject]@{ Name = $name; Path = $path; Action = (T (Get-ActionKey (Get-SafeProp $d 'CleaningActionID' 0))) }
+        }
+    } catch { return @() }
+    return $out
+}
+
+function New-ScanWatch {
+    param([datetime]$Since, [double]$ExpectedSec)
+    return @{ Since = $Since; Seen = @{}; NextPoll = 5.0; NextTick = 30.0; Expected = $ExpectedSec; Found = 0 }
+}
+
+function Step-ScanWatch {
+    <# Called on every tick of a running scan (-ElapsedSec is injectable for tests).
+       Every 5 s (only with -Detections): poll Defender for new detections. Every 30 s: log elapsed + estimate. Never throws. #>
+    param($Progress, [hashtable]$State, [double]$ElapsedSec, [switch]$Detections, [scriptblock]$DetectionSource = $null, [scriptblock]$ThreatSource = $null)
+    try {
+        if ($Detections -and $ElapsedSec -ge $State.NextPoll) {
+            $State.NextPoll = $ElapsedSec + 5.0
+            foreach ($f in @(Get-NewDefenderDetections -Since $State.Since -Seen $State.Seen -DetectionSource $DetectionSource -ThreatSource $ThreatSource)) {
+                $State.Found++
+                Add-ProgLog $Progress 'log.def.found' @($f.Name, $f.Path, $f.Action)
+            }
+        }
+        if ($ElapsedSec -ge $State.NextTick) {
+            $State.NextTick = $ElapsedSec + 30.0
+            $el = Format-Elapsed ([TimeSpan]::FromSeconds($ElapsedSec))
+            $e = Get-ScanEstimate -ElapsedSec $ElapsedSec -ExpectedSec $State.Expected
+            if ($e.Percent -lt 0) { Add-ProgLog $Progress 'log.scan.tickNoEst' @($el) }
+            elseif ($e.Over) { Add-ProgLog $Progress 'log.scan.tickOver' @($el, (Format-Remaining $State.Expected)) }
+            else { Add-ProgLog $Progress 'log.scan.tick' @($el, (Format-Remaining $State.Expected), (Format-Remaining $e.RemainingSec)) }
+        }
+    } catch { }
+}
+
+function Add-PctStepLog {
+    <# Logs 10 % steps ("sfc 30 %") once each; State.Last = highest step already logged. Never throws. #>
+    param($Progress, [hashtable]$State, [double]$Pct, [string]$Label)
+    try {
+        $step = [int]([Math]::Floor($Pct / 10.0) * 10)
+        if ($step -gt $State.Last) {
+            $State.Last = $step
+            Add-ProgLog $Progress 'log.int.step' @($Label, $step)
+        }
+    } catch { }
 }
 
 # ---------------------------------------------------------------- small helpers
@@ -545,12 +753,17 @@ function Invoke-ScanTool {
           $Progress = $null, [bool]$AllowCancel = $true, [int]$TimeoutMinutes = 240, [string]$TextKey = '', [string]$TextKeyNoPct = '')
     $tmp = Join-Path (Get-AppPaths).CacheDir ("sec-{0}.out" -f [guid]::NewGuid().ToString('N'))
     $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru -WindowStyle Hidden -RedirectStandardOutput $tmp
+    $stepState = @{ Last = 0 }
+    $stepLabel = if ($Kind -eq 'dism') { 'DISM' } else { 'sfc' }
     $w = Wait-ScanProcess -Process $p -Progress $Progress -AllowCancel $AllowCancel -TimeoutMinutes $TimeoutMinutes -OnTick {
         param($el)
         if ($null -eq $Progress) { return }
         $txt = Read-ProcessText (Read-SharedFileBytes $tmp)
         $pct = if ($Kind -eq 'dism') { ConvertFrom-DismProgress $txt } else { ConvertFrom-SfcProgress $txt }
-        if ($null -ne $pct) { Set-Prog $Progress -Percent $pct -Text (T $TextKey @([int][Math]::Round($pct))) }
+        if ($null -ne $pct) {
+            Set-Prog $Progress -Percent $pct -Text (T $TextKey @([int][Math]::Round($pct))) -Estimated $false
+            Add-PctStepLog $Progress $stepState $pct $stepLabel
+        }
         elseif ($TextKeyNoPct) { Set-Prog $Progress -Text (T $TextKeyNoPct @((Format-Elapsed $el))) }
     } -OnCancel { Stop-ProcessTree $p }
     $text = ''
@@ -568,9 +781,15 @@ function Invoke-DefenderScan {
     $textKey = if ($Type -eq 'Full') { 'prog.scanFull' } else { 'prog.scanQuick' }
     Write-Log -Message "Defender $scanType starting"
     $mpcmd = Get-MpCmdRunPath
+    $mpNow = $null
+    try { $mpNow = Get-MpComputerStatus -ErrorAction Stop } catch { }
+    $exp = Get-ExpectedScanSeconds -Type $Type -MpSource { $mpNow }
+    $watch = New-ScanWatch -Since $started -ExpectedSec $exp.Seconds
+    Add-ProgLog $Progress 'log.def.start' @((T "log.type.$Type"), [string](Get-SafeProp $mpNow 'AntivirusSignatureVersion' '?'), [string](Get-SafeProp $mpNow 'AMEngineVersion' '?'))
     if ($mpcmd) {
-        # MpCmdRun runs as a process, so it can be cancelled with `MpCmdRun.exe -Cancel`. No real percent exists.
-        Set-Prog $Progress -Percent -1 -Text (T $textKey @('00:00')) -CanCancel $true -CanPause $false -Phase 'defender'
+        # MpCmdRun runs as a process, so it can be cancelled with `MpCmdRun.exe -Cancel`. Defender reports no percent:
+        # Percent is estimated from the previous duration of this scan type (Estimated = $true).
+        Set-Prog $Progress -Percent 0 -Text (T $textKey @('00:00')) -CanCancel $true -CanPause $false -Phase 'defender' -Estimated $true
         $st = if ($Type -eq 'Full') { '2' } else { '1' }
         try {
             $proc = Start-Process -FilePath $mpcmd -ArgumentList @('-Scan', '-ScanType', $st) -PassThru -WindowStyle Hidden
@@ -579,7 +798,8 @@ function Invoke-DefenderScan {
         }
         $w = Wait-ScanProcess -Process $proc -Progress $Progress -AllowCancel $true -TimeoutMinutes 720 -OnTick {
             param($el)
-            Set-Prog $Progress -Text (T $textKey @((Format-Elapsed $el)))
+            Set-EstimatedProg $Progress $textKey $el.TotalSeconds $exp.Seconds
+            Step-ScanWatch $Progress $watch $el.TotalSeconds -Detections
         } -OnCancel {
             $null = Start-Process -FilePath $mpcmd -ArgumentList @('-Cancel') -WindowStyle Hidden -Wait -PassThru
         }
@@ -588,7 +808,7 @@ function Invoke-DefenderScan {
         if ($w.TimedOut) { return (New-ScanResult $Type 'Failed' @() 'timeout' $dur) }
         $exit = $w.ExitCode
     } else {
-        Set-Prog $Progress -Percent -1 -Text (T $textKey @('00:00')) -CanCancel $false -CanPause $false -Phase 'defender'
+        Set-Prog $Progress -Percent -1 -Text (T $textKey @('00:00')) -CanCancel $false -CanPause $false -Phase 'defender' -Estimated $false
         $exit = 0
         try {
             Start-MpScan -ScanType $scanType -ErrorAction Stop
@@ -621,6 +841,23 @@ function Invoke-DefenderScan {
     return (New-ScanResult $Type 'ThreatsRemoved' $threats 'Threats found and handled by Defender' $dur)
 }
 
+function Write-MrtLogLines {
+    <# Copies the meaningful result lines of the new mrt.log part into the live log (max 12, 160 chars each). #>
+    param($Progress, [AllowEmptyString()][string]$Text)
+    if ($null -eq $Progress -or -not $Text) { return }
+    try {
+        $n = 0
+        foreach ($line in ($Text -split "`r?`n")) {
+            $l = $line.Trim()
+            if (-not $l) { continue }
+            if ($l -notmatch '(?i)(no infection|infection|detected|removed|threat|malware|started on|finished on|return code|results summary)') { continue }
+            if ($l.Length -gt 160) { $l = $l.Substring(0, 157) + '...' }
+            Add-ProgLog $Progress 'log.mrt.line' @($l)
+            $n++; if ($n -ge 12) { break }
+        }
+    } catch { }
+}
+
 function Invoke-MrtScan {
     param([string]$Type, $Progress = $null)
     $started = Get-Date
@@ -633,11 +870,17 @@ function Invoke-MrtScan {
     $timeout = if ($Type -eq 'MrtFull') { 240 } else { 60 }
     $textKey = if ($Type -eq 'MrtFull') { 'prog.scanMrtFull' } else { 'prog.scanMrt' }
     Write-Log -Message ("MRT starting: " + ($args2 -join ' '))
-    Set-Prog $Progress -Percent -1 -Text (T $textKey @('00:00')) -CanCancel $true -CanPause $false -Phase 'mrt'
+    $exp = Get-ExpectedScanSeconds -Type $Type
+    $watch = New-ScanWatch -Since $started -ExpectedSec $exp.Seconds
+    $mrtVer = '?'
+    try { $mrtVer = [string](Get-Item -LiteralPath $mrt -ErrorAction Stop).VersionInfo.FileVersion } catch { }
+    Add-ProgLog $Progress 'log.mrt.start' @((T "log.type.$Type"), $mrtVer)
+    Set-Prog $Progress -Percent 0 -Text (T $textKey @('00:00')) -CanCancel $true -CanPause $false -Phase 'mrt' -Estimated $true
     $proc = Start-Process -FilePath $mrt -ArgumentList $args2 -PassThru -WindowStyle Hidden
     $w = Wait-ScanProcess -Process $proc -Progress $Progress -AllowCancel $true -TimeoutMinutes $timeout -OnTick {
         param($el)
-        Set-Prog $Progress -Text (T $textKey @((Format-Elapsed $el)))
+        Set-EstimatedProg $Progress $textKey $el.TotalSeconds $exp.Seconds
+        Step-ScanWatch $Progress $watch $el.TotalSeconds
     } -OnCancel { Stop-ProcessTree $proc }
     $r = [pscustomobject]@{ ExitCode = $w.ExitCode; TimedOut = $w.TimedOut }
     $dur = ((Get-Date) - $started).TotalSeconds
@@ -657,6 +900,7 @@ function Invoke-MrtScan {
             } finally { $fs.Dispose() }
         }
     } catch { Write-Log -Level WARN -Message "mrt.log unreadable: $($_.Exception.Message)" }
+    Write-MrtLogLines -Progress $Progress -Text $text
     if (-not $text.Trim()) {
         if ($r.ExitCode -eq 0) { return (New-ScanResult $Type 'Clean' @() 'Finished without findings (no log entry)' $dur) }
         return (New-ScanResult $Type 'Failed' @() ("MRT exit code " + $r.ExitCode + ", no log entry") $dur)
@@ -669,6 +913,23 @@ function Invoke-MrtScan {
     return (New-ScanResult $Type 'Failed' @() ("MRT exit code " + $r.ExitCode) $dur)
 }
 
+function Get-CbsLogPath { return (Join-Path ([Environment]::GetFolderPath('Windows')) 'Logs\CBS\CBS.log') }
+
+function Write-SfcResultLog {
+    <# One localized result line for an sfc state (Clean / Repaired / Unfixed / PendingReboot / Unknown), CBS.log hint when
+       files could not be repaired. Never throws. #>
+    param($Progress, [string]$State, $ExitCode = 0)
+    try {
+        switch ($State) {
+            'Clean'         { Add-ProgLog $Progress 'log.int.clean' }
+            'Repaired'      { Add-ProgLog $Progress 'log.int.repaired' }
+            'Unfixed'       { Add-ProgLog $Progress 'log.int.unfixed'; Add-ProgLog $Progress 'log.int.cbs' @((Get-CbsLogPath)) }
+            'PendingReboot' { Add-ProgLog $Progress 'log.int.pending' }
+            default         { Add-ProgLog $Progress 'log.int.unknown' @($ExitCode); Add-ProgLog $Progress 'log.int.cbs' @((Get-CbsLogPath)) }
+        }
+    } catch { }
+}
+
 function Invoke-IntegrityScan {
     param($Progress = $null)
     $started = Get-Date
@@ -676,12 +937,14 @@ function Invoke-IntegrityScan {
     $dism = Join-Path ([Environment]::GetFolderPath('System')) 'Dism.exe'
     Write-Log -Message 'sfc /scannow starting'
     # Each tool reports its own 0..100 (phase 'sfc' / 'dism'); sfc may run twice (before and after the DISM repair).
-    Set-Prog $Progress -Percent -1 -Text (T 'prog.sfcStart' @('00:00')) -CanCancel $true -CanPause $false -Phase 'sfc'
+    Add-ProgLog $Progress 'log.int.phaseSfc'
+    Set-Prog $Progress -Percent -1 -Text (T 'prog.sfcStart' @('00:00')) -CanCancel $true -CanPause $false -Phase 'sfc' -Estimated $false
     $r = Invoke-ScanTool -FilePath $sfc -ArgumentList @('/scannow') -Kind sfc -Progress $Progress -AllowCancel $true -TimeoutMinutes 240 -TextKey 'prog.sfc' -TextKeyNoPct 'prog.sfcStart'
     if ($r.Cancelled) { return (New-ScanResult 'Integrity' 'Cancelled' @() 'prog.cancelled' ((Get-Date) - $started).TotalSeconds) }
     if ($r.TimedOut) { return (New-ScanResult 'Integrity' 'Failed' @() 'sfc timeout' ((Get-Date) - $started).TotalSeconds) }
     $state = ConvertFrom-SfcOutput $r.Output
     Write-Log -Message "sfc result: $state (exit $($r.ExitCode))"
+    Write-SfcResultLog -Progress $Progress -State $state -ExitCode $r.ExitCode
     switch ($state) {
         'Clean'    { return (New-ScanResult 'Integrity' 'Clean' @() 'No integrity violations' ((Get-Date) - $started).TotalSeconds) }
         'Repaired' { return (New-ScanResult 'Integrity' 'ThreatsRemoved' @() 'Corrupt system files were repaired' ((Get-Date) - $started).TotalSeconds) }
@@ -691,21 +954,41 @@ function Invoke-IntegrityScan {
     # Unfixed corruption -> repair the component store with DISM, then verify again with sfc.
     if (Test-ProgCancel $Progress) { return (New-ScanResult 'Integrity' 'Cancelled' @() 'prog.cancelled' ((Get-Date) - $started).TotalSeconds) }
     Write-Log -Message 'DISM RestoreHealth starting'
+    Add-ProgLog $Progress 'log.int.phaseDism'
     # Interrupting a component-store repair can leave the store inconsistent: not cancellable, not pausable.
     Set-Prog $Progress -Percent -1 -Text (T 'prog.noCancelRepair') -CanCancel $false -CanPause $false -Phase 'dism'
     $d = Invoke-ScanTool -FilePath $dism -ArgumentList @('/Online', '/Cleanup-Image', '/RestoreHealth') -Kind dism -Progress $Progress -AllowCancel $false -TimeoutMinutes 240 -TextKey 'prog.dismRepair' -TextKeyNoPct 'prog.noCancelRepair'
     if ($d.TimedOut) { return (New-ScanResult 'Integrity' 'Failed' @() 'DISM timeout' ((Get-Date) - $started).TotalSeconds) }
     if ($d.ExitCode -ne 0) {
+        Add-ProgLog $Progress 'log.int.dismFail' @($d.ExitCode)
+        Add-ProgLog $Progress 'log.int.cbs' @((Get-CbsLogPath))
         return (New-ScanResult 'Integrity' 'ThreatsFound' @() ("sfc found unfixable files; DISM failed (exit " + $d.ExitCode + ")") ((Get-Date) - $started).TotalSeconds)
     }
     if (Test-ProgCancel $Progress) { return (New-ScanResult 'Integrity' 'Cancelled' @() 'prog.cancelled' ((Get-Date) - $started).TotalSeconds) }
-    Set-Prog $Progress -Percent -1 -Text (T 'prog.sfcStart' @('00:00')) -CanCancel $true -CanPause $false -Phase 'sfc'
+    Add-ProgLog $Progress 'log.int.dismOk'
+    Add-ProgLog $Progress 'log.int.phaseSfc2'
+    Set-Prog $Progress -Percent -1 -Text (T 'prog.sfcStart' @('00:00')) -CanCancel $true -CanPause $false -Phase 'sfc' -Estimated $false
     $r2 = Invoke-ScanTool -FilePath $sfc -ArgumentList @('/scannow') -Kind sfc -Progress $Progress -AllowCancel $true -TimeoutMinutes 240 -TextKey 'prog.sfc' -TextKeyNoPct 'prog.sfcStart'
     if ($r2.Cancelled) { return (New-ScanResult 'Integrity' 'Cancelled' @() 'prog.cancelled' ((Get-Date) - $started).TotalSeconds) }
     $state2 = ConvertFrom-SfcOutput $r2.Output
+    Write-SfcResultLog -Progress $Progress -State $state2 -ExitCode $r2.ExitCode
     $dur = ((Get-Date) - $started).TotalSeconds
     if ($state2 -eq 'Clean' -or $state2 -eq 'Repaired') { return (New-ScanResult 'Integrity' 'ThreatsRemoved' @() 'Repaired with DISM and sfc' $dur) }
     return (New-ScanResult 'Integrity' 'ThreatsFound' @() 'Some system files could not be repaired - see CBS.log' $dur)
+}
+
+function Write-ScanFinishLog {
+    <# "<scan> finished after mm:ss: <result>" (or the cancelled variant). Never throws. #>
+    param($Progress, [string]$Type, $Result)
+    try {
+        $dur = Format-Elapsed ([TimeSpan]::FromSeconds([double]$Result.DurationSec))
+        $label = T "log.type.$Type"
+        if ($Result.Status -eq 'Cancelled') { Add-ProgLog $Progress 'log.scan.cancelled' @($label, $dur); return }
+        $threats = @($Result.Threats)
+        $txt = T ("log.res." + $Result.Status)
+        if ($threats.Count -gt 0) { $txt += ' (' + (($threats | Select-Object -First 3) -join ', ') + ')' }
+        Add-ProgLog $Progress 'log.scan.finished' @($label, $dur, $txt)
+    } catch { }
 }
 
 function Start-SecurityScan {
@@ -721,6 +1004,7 @@ function Start-SecurityScan {
         Initialize-DataDir
         if (Test-ProgCancel $Progress) { return (New-ScanResult $Type 'Cancelled' @() 'prog.cancelled' 0) }
         $res = $null
+        Set-Prog $Progress -Estimated $false
         switch ($Type) {
             { $_ -in 'Quick', 'Full' } {
                 if (Test-DefenderPassive) { return (New-ScanResult $Type 'Skipped' @() 'defender-passive' 0) }
@@ -729,8 +1013,12 @@ function Start-SecurityScan {
             { $_ -in 'Mrt', 'MrtFull' } { $res = Invoke-MrtScan $Type $Progress }
             'Integrity' { $res = Invoke-IntegrityScan $Progress }
         }
+        if ($res -and $res.Status -in 'Clean', 'ThreatsFound', 'ThreatsRemoved') {
+            if ($Type -ne 'Integrity' -or $res.Status -eq 'Clean') { [void](Save-ScanDuration -Type $Type -Seconds $res.DurationSec) }
+        }
+        if ($res) { Write-ScanFinishLog -Progress $Progress -Type $Type -Result $res }
         if ($Progress) {
-            Set-Prog $Progress -CanCancel $false -CanPause $false
+            Set-Prog $Progress -CanCancel $false -CanPause $false -Estimated $false
             if ($res -and $res.Status -eq 'Cancelled') { Set-Prog $Progress -Text (T 'prog.cancelled') }
             else { Set-Prog $Progress -Percent 100 -Text (T 'prog.done') }
         }
@@ -741,4 +1029,4 @@ function Start-SecurityScan {
     }
 }
 
-Export-ModuleMember -Function Get-SecurityStatus, Start-SecurityScan, Get-ThreatHistory, Get-MrtPath, Get-MrtLogPath, ConvertFrom-MrtLog, ConvertFrom-SfcOutput, ConvertFrom-SfcProgress, ConvertFrom-DismProgress, Get-MpCmdRunPath, Test-DefenderPassive, Get-ThirdPartyAntivirus
+Export-ModuleMember -Function Get-SecurityStatus, Start-SecurityScan, Get-ThreatHistory, Get-MrtPath, Get-MrtLogPath, ConvertFrom-MrtLog, ConvertFrom-SfcOutput, ConvertFrom-SfcProgress, ConvertFrom-DismProgress, Get-MpCmdRunPath, Test-DefenderPassive, Get-ThirdPartyAntivirus, Get-ExpectedScanSeconds, Get-ScanEstimate, Save-ScanDuration, Read-ScanDurations, Get-ScanDurationsPath, Get-NewDefenderDetections, New-ScanWatch, Step-ScanWatch, Add-PctStepLog, Format-Remaining

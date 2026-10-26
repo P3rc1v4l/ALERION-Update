@@ -27,3 +27,5 @@ Thumbs.db
 desktop.ini
 .vscode/
 .claude/
+
+tmp/

@@ -23,6 +23,11 @@
   "CleanupIds": ["temp", "wucache", "docache", "thumbs", "wer", "shadercache", "dumps", "appcache"],
   "MinimizeToTray": false,
   "PriorityOverrides": {},
+  "Appearance": {
+    "Accent": "Blue",
+    "Scale": 100,
+    "StartPage": "Overview"
+  },
   "AutoInstallPriorities": ["Critical", "Important", "Normal"],
   "Sources": {
     "Winget": true,

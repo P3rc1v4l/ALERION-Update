@@ -217,6 +217,196 @@ Check 'Invoke-ScanTool: Cancel is ignored when AllowCancel=false (DISM repair)' 
     -not $r.Cancelled -and $r.ExitCode -eq 0
 }
 
+# ---------------------------------------------------------------- live log, estimate, detection polling
+Write-Host 'Live log, estimate, detection polling' -ForegroundColor Cyan
+$sec = Get-Module SecurityScan
+$fragPath = Join-Path $root 'src\i18n.json'
+function Merge-I18nFragment {
+    # Adds the new keys to the Common instance the module under test really uses (i18n.json itself is merged by the app).
+    param([string]$ModuleName)
+    $mod = & (Get-Module $ModuleName) { (Get-Command T).ScriptBlock.Module }
+    $frag = Get-Content -LiteralPath $fragPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    & $mod { param($f)
+        $null = T "prog.done"
+        foreach ($l in 'de', 'en') { foreach ($p in $f.$l.PSObject.Properties) { Add-Member -InputObject $script:I18n.$l -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force } }
+    } $frag
+}
+function New-LogProgress { [hashtable]::Synchronized(@{ Log = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList)) }) }
+Merge-I18nFragment 'SecurityScan'
+
+Check 'i18n: valid JSON, de/en have identical keys' {
+    $f = Get-Content -LiteralPath $fragPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $a = @($f.de.PSObject.Properties.Name | Sort-Object); $b = @($f.en.PSObject.Properties.Name | Sort-Object)
+    ($a -join ',') -eq ($b -join ',') -and $a.Count -gt 50
+}
+Check 'fragment: every log./prog.est key used by the three modules exists' {
+    $f = Get-Content -LiteralPath $fragPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $have = @($f.de.PSObject.Properties.Name)
+    $miss = New-Object System.Collections.Generic.List[string]
+    foreach ($m in 'SecurityScan', 'Cleanup', 'Uninstaller') {
+        $t = Get-Content -LiteralPath (Join-Path $root "src\$m.psm1") -Raw
+        foreach ($mm in [regex]::Matches($t, "'((?:log\.[A-Za-z0-9.]+)|(?:prog\.est[A-Za-z]+))'")) { if ($have -notcontains $mm.Groups[1].Value) { $miss.Add($mm.Groups[1].Value) } }
+    }
+    if ($miss.Count) { throw ('missing: ' + (($miss | Select-Object -Unique) -join ', ')) }
+    $true
+}
+Check 'Add-ProgLog: timestamped line, no Log key / null progress never throw' {
+    $p = New-LogProgress
+    & $sec { param($pp) Add-ProgLog $pp 'log.mrt.line' @('hello') } $p
+    & $sec { Add-ProgLog $null 'log.mrt.line' @('x'); Add-ProgLog ([hashtable]::Synchronized(@{})) 'log.mrt.line' @('x'); Add-ProgLog @{ Log = 5 } 'log.mrt.line' @('x') }
+    $p['Log'].Count -eq 1 -and $p['Log'][0] -match '^\d\d:\d\d:\d\d  .*hello'
+}
+Check 'Add-ProgLog: capped at 500 lines, oldest dropped' {
+    $p = New-LogProgress
+    & $sec { param($pp) 1..520 | ForEach-Object { Add-ProgLog $pp 'log.mrt.line' @("line $_") } } $p
+    $p['Log'].Count -eq 500 -and $p['Log'][0] -match 'line 21$' -and $p['Log'][499] -match 'line 520$'
+}
+Check 'Get-ScanEstimate: percent, remaining, 95 cap, no expectation' {
+    $a = Get-ScanEstimate -ElapsedSec 60 -ExpectedSec 240
+    $b = Get-ScanEstimate -ElapsedSec 1000 -ExpectedSec 240
+    $c = Get-ScanEstimate -ElapsedSec 10 -ExpectedSec 0
+    $d = Get-ScanEstimate -ElapsedSec -5 -ExpectedSec 100
+    $a.Percent -eq 25 -and $a.RemainingSec -eq 180 -and -not $a.Over -and $b.Percent -eq 95 -and $b.RemainingSec -eq 0 -and $b.Over -and $c.Percent -eq -1 -and $d.Percent -eq 0
+}
+Check 'Format-Remaining: rounds up, minutes and hours' {
+    (Format-Remaining 5) -eq '1 min' -and (Format-Remaining 180) -eq '3 min' -and (Format-Remaining 181) -eq '4 min' -and (Format-Remaining 4800) -eq '1 h 20 min'
+}
+Remove-Item -LiteralPath (Get-ScanDurationsPath) -Force -ErrorAction SilentlyContinue
+Check 'Get-ExpectedScanSeconds without history: defaults (Quick 4 min, Full 60 min)' {
+    $q = Get-ExpectedScanSeconds -Type Quick -MpSource { $null }
+    $f = Get-ExpectedScanSeconds -Type Full -MpSource { $null }
+    $m = Get-ExpectedScanSeconds -Type Mrt
+    $q.Seconds -eq 240 -and $q.Source -eq 'default' -and $f.Seconds -eq 3600 -and $m.Source -eq 'default' -and $m.Seconds -gt 0
+}
+Check 'Get-ExpectedScanSeconds: Defender last scan duration from Get-MpComputerStatus (mock), sanity-checked' {
+    $t0 = Get-Date '2026-01-01 10:00:00'
+    $mp = [pscustomobject]@{ QuickScanStartTime = $t0; QuickScanEndTime = $t0.AddMinutes(7); FullScanStartTime = $t0; FullScanEndTime = $t0.AddMinutes(95) }
+    $bad = [pscustomobject]@{ QuickScanStartTime = $t0; QuickScanEndTime = $t0.AddMinutes(-3); FullScanStartTime = $null; FullScanEndTime = $null }
+    $q = Get-ExpectedScanSeconds -Type Quick -MpSource ({ $mp }.GetNewClosure())
+    $f = Get-ExpectedScanSeconds -Type Full -MpSource ({ $mp }.GetNewClosure())
+    $b = Get-ExpectedScanSeconds -Type Quick -MpSource ({ $bad }.GetNewClosure())
+    $e = Get-ExpectedScanSeconds -Type Quick -MpSource { throw 'no defender' }
+    $q.Seconds -eq 420 -and $q.Source -eq 'defender' -and $f.Seconds -eq 5700 -and $b.Source -eq 'default' -and $b.Seconds -eq 240 -and $e.Seconds -eq 240
+}
+Check 'DryRun / non-success never writes the durations file' {
+    [void](Start-SecurityScan -Type Quick -DryRun)
+    [void](Start-SecurityScan -Type Mrt -DryRun)
+    -not (Test-Path -LiteralPath (Get-ScanDurationsPath))
+}
+Check 'Save-ScanDuration: writes <StateDir>\scan-durations.json, merges types, ignores bad values' {
+    $p = Get-ScanDurationsPath
+    if ($p -ne (Join-Path (Get-AppPaths).StateDir 'scan-durations.json')) { throw "path $p" }
+    if (-not (Save-ScanDuration -Type Quick -Seconds 123.456)) { throw 'save Quick' }
+    if (-not (Save-ScanDuration -Type MrtFull -Seconds 999)) { throw 'save MrtFull' }
+    if (Save-ScanDuration -Type Full -Seconds 0) { throw 'zero accepted' }
+    if (Save-ScanDuration -Type Full -Seconds -4) { throw 'negative accepted' }
+    $j = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
+    $r = Read-ScanDurations
+    $j.Quick -eq 123.5 -and $j.MrtFull -eq 999 -and -not ($j.PSObject.Properties.Name -contains 'Full') -and $r['Quick'] -eq 123.5 -and $r.Count -eq 2
+}
+Check 'Get-ExpectedScanSeconds prefers the history file, other types keep their default' {
+    $q = Get-ExpectedScanSeconds -Type Quick -MpSource { throw 'must not be asked' }
+    $mf = Get-ExpectedScanSeconds -Type MrtFull
+    $m = Get-ExpectedScanSeconds -Type Mrt
+    $q.Seconds -eq 123.5 -and $q.Source -eq 'history' -and $mf.Seconds -eq 999 -and $mf.Source -eq 'history' -and $m.Source -eq 'default'
+}
+Check 'Read-ScanDurations / Save-ScanDuration survive a corrupt file' {
+    [IO.File]::WriteAllText((Get-ScanDurationsPath), '{ not json ]')
+    $r = Read-ScanDurations
+    $ok = Save-ScanDuration -Type Integrity -Seconds 321
+    $r.Count -eq 0 -and $ok -and (Read-ScanDurations)['Integrity'] -eq 321
+}
+Check 'Set-EstimatedProg: Percent from elapsed/expected, Estimated=true, text has elapsed and remaining' {
+    $p = [hashtable]::Synchronized(@{})
+    & $sec { param($pp) Set-EstimatedProg $pp 'prog.scanQuick' 60 240 } $p
+    $over = [hashtable]::Synchronized(@{})
+    & $sec { param($pp) Set-EstimatedProg $pp 'prog.scanQuick' 600 240 } $over
+    $p['Percent'] -eq 25 -and $p['Estimated'] -eq $true -and $p['Text'] -match '01:00' -and $p['Text'] -match '3 min' -and $over['Percent'] -eq 95 -and $over['Text'] -match '10:00'
+}
+Check 'Get-NewDefenderDetections (mock): filters by start time, dedupes, resolves name/path/action' {
+    $t0 = Get-Date
+    $script:mockDet = @(
+        [pscustomobject]@{ DetectionID = 'A'; ThreatID = 7; InitialDetectionTime = $t0.AddMinutes(-30); Resources = @('file:_C:\old\a.exe'); CleaningActionID = 2 },
+        [pscustomobject]@{ DetectionID = 'B'; ThreatID = 7; InitialDetectionTime = $t0.AddSeconds(2); Resources = @('file:_C:\Temp\evil.exe', 'file:_C:\Temp\evil.dll'); CleaningActionID = 2 },
+        [pscustomobject]@{ DetectionID = 'C'; ThreatID = 9; InitialDetectionTime = $t0.AddSeconds(3); Resources = @('regkey:_HKLM\Software\Bad'); CleaningActionID = 99 }
+    )
+    $script:mockThr = @([pscustomobject]@{ ThreatID = 7; ThreatName = 'Trojan:Win32/Test.A' })
+    $seen = @{}
+    $n1 = @(Get-NewDefenderDetections -Since $t0 -Seen $seen -DetectionSource { $script:mockDet } -ThreatSource { $script:mockThr })
+    $n2 = @(Get-NewDefenderDetections -Since $t0 -Seen $seen -DetectionSource { $script:mockDet } -ThreatSource { $script:mockThr })
+    if ($n1.Count -ne 2) { throw "first poll $($n1.Count)" }
+    if ($n2.Count -ne 0) { throw "second poll $($n2.Count) (not deduped)" }
+    $n1[0].Name -eq 'Trojan:Win32/Test.A' -and $n1[0].Path -eq 'C:\Temp\evil.exe; C:\Temp\evil.dll' -and $n1[0].Action -and $n1[1].Name -eq 'Threat 9' -and $n1[1].Path -eq 'HKLM\Software\Bad'
+}
+Check 'Get-NewDefenderDetections: a failing source returns nothing and never throws' {
+    $r = @(Get-NewDefenderDetections -Since (Get-Date) -Seen @{} -DetectionSource { throw 'boom' })
+    $r.Count -eq 0
+}
+Check 'Step-ScanWatch: polls at 5 s, logs each NEW detection once, status line every 30 s' {
+    $t0 = Get-Date
+    $script:mockDet = @([pscustomobject]@{ DetectionID = 'X1'; ThreatID = 7; InitialDetectionTime = $t0.AddSeconds(1); Resources = @('file:_C:\Temp\evil.exe'); CleaningActionID = 3 })
+    $script:mockThr = @([pscustomobject]@{ ThreatID = 7; ThreatName = 'Trojan:Win32/Test.A' })
+    $script:polls = 0
+    $src = { $script:polls++; $script:mockDet }
+    $thr = { $script:mockThr }
+    $p = New-LogProgress
+    $w = New-ScanWatch -Since $t0 -ExpectedSec 240
+    foreach ($e in 1, 2, 3, 4) { Step-ScanWatch $p $w $e -Detections -DetectionSource $src -ThreatSource $thr }
+    if ($script:polls -ne 0 -or $p['Log'].Count -ne 0) { throw "before 5 s: polls=$($script:polls) log=$($p['Log'].Count)" }
+    Step-ScanWatch $p $w 5 -Detections -DetectionSource $src -ThreatSource $thr
+    Step-ScanWatch $p $w 7 -Detections -DetectionSource $src -ThreatSource $thr     # not yet due
+    if ($script:polls -ne 1) { throw "polls $($script:polls)" }
+    if ($p['Log'].Count -ne 1 -or $p['Log'][0] -notmatch 'Trojan:Win32/Test\.A' -or $p['Log'][0] -notmatch 'evil\.exe') { throw "detection line: $($p['Log'] -join ' | ')" }
+    Step-ScanWatch $p $w 10 -Detections -DetectionSource $src -ThreatSource $thr
+    if ($script:polls -ne 2 -or $p['Log'].Count -ne 1) { throw "repeat: polls=$($script:polls) log=$($p['Log'].Count)" }
+    Step-ScanWatch $p $w 31 -Detections -DetectionSource $src -ThreatSource $thr
+    if ($p['Log'].Count -ne 2 -or $p['Log'][1] -notmatch '00:31') { throw "tick line: $($p['Log'] -join ' | ')" }
+    Step-ScanWatch $p $w 40 -Detections -DetectionSource $src -ThreatSource $thr
+    $p['Log'].Count -eq 2
+}
+Check 'Step-ScanWatch: over-estimate wording, no polling without -Detections (MRT)' {
+    $script:polls = 0
+    $p = New-LogProgress
+    $w = New-ScanWatch -Since (Get-Date) -ExpectedSec 20
+    Step-ScanWatch $p $w 45 -DetectionSource { $script:polls++; @() }
+    $script:polls -eq 0 -and $p['Log'].Count -eq 1 -and $p['Log'][0] -match '00:45' -and $p['Log'][0] -match '20|1 min'
+}
+Check 'Add-PctStepLog: one line per 10 % step, never twice' {
+    $p = New-LogProgress
+    $st2 = @{ Last = 0 }
+    foreach ($v in 5, 12, 18, 12, 35, 99, 100) { & $sec { param($pp, $s2, $v2) Add-PctStepLog $pp $s2 $v2 'sfc' } $p $st2 $v }
+    $p['Log'].Count -eq 4 -and $p['Log'][0] -match 'sfc.* 10' -and $p['Log'][1] -match '30' -and $p['Log'][2] -match '90' -and $p['Log'][3] -match '100'
+}
+Check 'Write-SfcResultLog: result lines per state, CBS.log hint when files could not be repaired' {
+    $p = New-LogProgress
+    & $sec { param($pp) Write-SfcResultLog $pp 'Clean' 0; Write-SfcResultLog $pp 'Repaired' 0 } $p
+    $a = $p['Log'].Count
+    & $sec { param($pp) Write-SfcResultLog $pp 'Unfixed' 0 } $p
+    $a -eq 2 -and $p['Log'].Count -eq 4 -and $p['Log'][3] -match 'CBS\.log'
+}
+Check 'Write-MrtLogLines: keeps the result lines of mrt.log, drops noise' {
+    $p = New-LogProgress
+    $txt = "Microsoft Windows Malicious Software Removal Tool v5.120`r`nrandom noise line`r`nStarted On Mon Oct 05 2026`r`n`r`nResults Summary:`r`n----------------`r`nNo infection found.`r`nFinished On Mon Oct 05 2026, Return code: 0 (0x0)"
+    & $sec { param($pp, $t) Write-MrtLogLines $pp $t } $p $txt
+    $all = $p['Log'] -join "`n"
+    $p['Log'].Count -ge 4 -and $all -match 'No infection found' -and $all -notmatch 'random noise'
+}
+Check 'Write-ScanFinishLog: finished (with duration and threats) and cancelled' {
+    $p = New-LogProgress
+    $r1 = [pscustomobject]@{ Type = 'Quick'; Status = 'ThreatsRemoved'; Threats = @('Trojan:X'); Message = ''; DurationSec = 125 }
+    $r2 = [pscustomobject]@{ Type = 'Quick'; Status = 'Cancelled'; Threats = @(); Message = ''; DurationSec = 61 }
+    & $sec { param($pp, $a, $b) Write-ScanFinishLog $pp 'Quick' $a; Write-ScanFinishLog $pp 'Quick' $b } $p $r1 $r2
+    $p['Log'].Count -eq 2 -and $p['Log'][0] -match '02:05' -and $p['Log'][0] -match 'Trojan:X' -and $p['Log'][1] -match '01:01'
+}
+Check 'Invoke-ScanTool logs 10 % steps and keeps Estimated=false (real percent)' {
+    $p = New-LogProgress
+    $p['Estimated'] = $true
+    $args3 = @('/u', '/c', 'echo Verification 25% complete.&ping -n 4 127.0.0.1 >nul&echo Verification 100% complete.')
+    $r = & $sec { param($c, $a, $pp) Invoke-ScanTool -FilePath $c -ArgumentList $a -Kind sfc -Progress $pp -AllowCancel $true -TextKey 'prog.sfc' } $cmd $args3 $p
+    if ($r.ExitCode -ne 0) { throw "exit $($r.ExitCode)" }
+    $p['Estimated'] -eq $false -and $p['Log'].Count -ge 1 -and $p['Log'][0] -match 'sfc' -and $p['Log'][0] -match '20'
+}
+
 Remove-Item $env:UPDATECENTER_DATADIR -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
 if ($failures.Count -gt 0) { Write-Host "$($failures.Count) failed, $passed passed" -ForegroundColor Red; exit 1 }

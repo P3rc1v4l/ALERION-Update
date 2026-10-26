@@ -175,6 +175,29 @@ Check 'Remove-AppLeftovers refuses Safe=false and tampered Safe=true on protecte
 Write-Host 'Progress, cancel, pause' -ForegroundColor Cyan
 $pausedText = T 'prog.paused'
 
+# Live log: the new i18n keys live in a fragment that the app merges into i18n.json; merge them here so line texts can be checked.
+$fragPath = Join-Path $src 'i18n.json'
+$unMod = Get-Module Uninstaller
+$tMod = & $unMod { (Get-Command T).ScriptBlock.Module }
+$frag = Get-Content -LiteralPath $fragPath -Raw -Encoding UTF8 | ConvertFrom-Json
+& $tMod { param($f)
+    $null = T 'prog.done'
+    foreach ($l in 'de', 'en') { foreach ($p in $f.$l.PSObject.Properties) { Add-Member -InputObject $script:I18n.$l -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force } }
+} $frag
+# Same merge for the module copy that runs inside a job runspace (prefix for the job code).
+$mergeCode = '$mm = & (Get-Module Uninstaller) { (Get-Command T).ScriptBlock.Module }; $fr = Get-Content -LiteralPath ''' + $fragPath + ''' -Raw -Encoding UTF8 | ConvertFrom-Json; & $mm { param($f) $null = T "prog.done"; foreach ($l in "de","en") { foreach ($p in $f.$l.PSObject.Properties) { Add-Member -InputObject $script:I18n.$l -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force } } } $fr; '
+function New-LogProgress { [hashtable]::Synchronized(@{ Log = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList)) }) }
+
+Check 'Add-ProgLog: timestamped line; null / no Log key never throw; capped at 500' {
+    $p = New-LogProgress
+    & $unMod { param($pp) Add-ProgLog $pp 'log.un.removedApp' @('Foo') } $p
+    & $unMod { Add-ProgLog $null 'log.un.removedApp' @('a'); Add-ProgLog ([hashtable]::Synchronized(@{})) 'log.un.removedApp' @('a'); Add-ProgLog @{ Log = 5 } 'log.un.removedApp' @('a') }
+    if ($p['Log'].Count -ne 1 -or $p['Log'][0] -notmatch '^\d\d:\d\d:\d\d  .*Foo') { throw "line: $($p['Log'] -join '|')" }
+    $q = New-LogProgress
+    & $unMod { param($pp) 1..520 | ForEach-Object { Add-ProgLog $pp 'log.un.removedApp' @("app$_") } } $q
+    $q['Log'].Count -eq 500 -and $q['Log'][0] -match 'app21\b' -and $q['Log'][499] -match 'app520\b'
+}
+
 function Start-ModJob {
     param([string]$Code, [hashtable]$Progress, [hashtable]$Vars = @{})
     $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
@@ -269,8 +292,8 @@ New-Item -Path $fakeKey -Force | Out-Null
 $ping = Join-Path ([Environment]::GetFolderPath('System')) 'PING.EXE'
 try {
     $fake = New-ProgFakeApp -Name 'UC Prog Fake Program' -Key $fakeKey -Un ('"' + $ping + '" -n 5 127.0.0.1')
-    $prog = [hashtable]::Synchronized(@{})
-    $job = Start-ModJob -Progress $prog -Vars @{ App = $fake } -Code 'Invoke-AppUninstall -App $App -Progress $Progress'
+    $prog = New-LogProgress
+    $job = Start-ModJob -Progress $prog -Vars @{ App = $fake } -Code ($mergeCode + 'Invoke-AppUninstall -App $App -Progress $Progress')
     $okPhase = Wait-Until { $prog['Phase'] -eq 'uninstall' -and $prog['Percent'] -eq -1 }
     $uninstallFlags = ($prog['CanCancel'] -eq $false) -and ($prog['CanPause'] -eq $false)
     Start-Sleep -Milliseconds 1300
@@ -283,6 +306,11 @@ try {
     Check 'uninstall phase: indeterminate, CanCancel=false, CanPause=false' { $okPhase -and $uninstallFlags }
     Check 'uninstall phase: elapsed text shown, Cancel ignored while the uninstaller runs' { $elapsedText -match '\d\d:\d\d|prog\.uninstalling' -and $stillRunning }
     Check 'uninstall: result Removed, Percent 100, final CanCancel false' { $ur[0].Status -eq 'Removed' -and $prog['Percent'] -eq 100 -and $prog['CanCancel'] -eq $false }
+    Check 'uninstall log: start, method, exit code, verify, removed - in that order, each with the app/method details' {
+        $l = @($prog['Log'])
+        if ($l.Count -ne 5) { throw "expected 5 lines, got $($l.Count): $($l -join ' | ')" }
+        $l[0] -match 'UC Prog Fake Program' -and $l[1] -match '1' -and $l[2] -match '\b0\b' -and $l[3] -match 'UC Prog Fake Program' -and $l[4] -match 'UC Prog Fake Program'
+    }
 } finally { Remove-Item -LiteralPath $fakeKey -Recurse -Force -ErrorAction SilentlyContinue }
 
 # Find-AppLeftovers / Remove-AppLeftovers with progress (private folders under LOCALAPPDATA, DryRun removal).
@@ -292,8 +320,8 @@ Set-Content -LiteralPath (Join-Path $fo 'a.txt') -Value 'x'
 try {
     $app = New-ProgFakeApp -Name (Split-Path -Leaf $fo) -Key 'HKCU:\Software\UCNope2'
     $app.InstallLocation = $fo
-    $prog = [hashtable]::Synchronized(@{})
-    $job = Start-ModJob -Progress $prog -Vars @{ App = $app } -Code '@(Find-AppLeftovers -App $App -InstalledApps @() -Progress $Progress)'
+    $prog = New-LogProgress
+    $job = Start-ModJob -Progress $prog -Vars @{ App = $app } -Code ($mergeCode + '@(Find-AppLeftovers -App $App -InstalledApps @() -Progress $Progress)')
     $samples = New-Object System.Collections.Generic.List[double]; $sawCancel = $false; $sawPhase = ''
     while (-not $job.Handle.IsCompleted) {
         $pc = $prog['Percent']; if ($null -ne $pc) { $samples.Add([double]$pc) }
@@ -307,6 +335,10 @@ try {
         if ($prog['Percent'] -ne 100) { throw "final $($prog['Percent'])" }
         for ($i = 1; $i -lt $samples.Count; $i++) { if ($samples[$i] -lt $samples[$i - 1]) { throw 'backwards' } }
         $sawCancel -and $sawPhase -eq 'leftovers'
+    }
+    Check 'Find-AppLeftovers log: search start, found item(s), search summary with the count' {
+        $l = @($prog['Log'])
+        $l.Count -ge 3 -and $l[0] -match [regex]::Escape($app.Name) -and (@($l | Where-Object { $_ -match [regex]::Escape($fo) }).Count -ge 1) -and $l[$l.Count - 1] -match "\b$($items.Count)\b"
     }
     $prog = [hashtable]::Synchronized(@{ Pause = $true })
     $job = Start-ModJob -Progress $prog -Vars @{ App = $app } -Code '@(Find-AppLeftovers -App $App -InstalledApps @() -Progress $Progress)'
@@ -334,10 +366,14 @@ try {
             [pscustomobject]@{ Type = 'Folder'; Path = $fo; SizeMB = 0; Safe = $true; Reason = 'app-folder' },
             [pscustomobject]@{ Type = 'Folder'; Path = $fo2; SizeMB = 0; Safe = $true; Reason = 'app-folder' }
         )
-        $prog = [hashtable]::Synchronized(@{})
+        $prog = New-LogProgress
         $rr = @(Remove-AppLeftovers -Items $its -DryRun -Progress $prog)
         Check 'Remove-AppLeftovers -DryRun -Progress: WouldRemove for each, Percent 100, nothing deleted' {
             $rr.Count -eq 2 -and @($rr | Where-Object { $_.Status -ne 'WouldRemove' }).Count -eq 0 -and $prog['Percent'] -eq 100 -and (Test-Path -LiteralPath $fo) -and (Test-Path -LiteralPath $fo2) -and $prog['Phase'] -eq 'leftovers'
+        }
+        Check 'Remove-AppLeftovers log: start, one line per item, summary with the counts' {
+            $l = @($prog['Log'])
+            $l.Count -eq 4 -and $l[0] -match '\b2\b' -and $l[1] -match [regex]::Escape($fo) -and $l[2] -match [regex]::Escape($fo2) -and $l[3] -match '\b2\b'
         }
         $prog = [hashtable]::Synchronized(@{ Pause = $true })
         $job = Start-ModJob -Progress $prog -Vars @{ Its = $its } -Code '@(Remove-AppLeftovers -Items $Its -DryRun -Progress $Progress)'

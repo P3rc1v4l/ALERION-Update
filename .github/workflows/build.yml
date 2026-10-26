@@ -18,6 +18,11 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
+      - name: Releases only from main
+        if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only' && github.ref != 'refs/heads/main'
+        shell: powershell
+        run: throw "Releases are built from main only (this run: $env:GITHUB_REF)"
+
       - uses: actions/checkout@v4
 
       - name: Smoke test (Windows PowerShell 5.1)
@@ -32,7 +37,7 @@ jobs:
         shell: powershell
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.21.0 -Scope CurrentUser -Force
           $issues = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error
           $issues | Format-Table -AutoSize
           if ($issues) { throw "PSScriptAnalyzer found $($issues.Count) error(s)" }
@@ -53,6 +58,10 @@ jobs:
           git archive --format=zip -o $tmpZip HEAD
           Expand-Archive -Path $tmpZip -DestinationPath $stage -Force
           Remove-Item $tmpZip
+          # git archive stamps files with the commit time; give them the build time so no client-side
+          # cleanup of "old" cache files can ever touch a freshly downloaded package.
+          $now = Get-Date
+          Get-ChildItem $stage -Recurse -File -Force | ForEach-Object { $_.LastWriteTime = $now }
           $mode = 'none'
           if ($env:HAS_PFX -eq 'true') { $mode = 'pfx' } elseif ($env:HAS_TS -eq 'true') { $mode = 'ts' }
           if ($mode -eq 'none') { Write-Host '::notice::No signing secrets configured - building an UNSIGNED package (see docs/CODE_SIGNING.md).' }
@@ -191,6 +200,23 @@ jobs:
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
+
+      - name: Verify package (what clients will install)
+        if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'
+        shell: powershell
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $zip = "UpdateCenter-v$version.zip"
+          $x = Join-Path $env:RUNNER_TEMP 'verify'
+          Expand-Archive -Path $zip -DestinationPath $x -Force
+          foreach ($r in @('VERSION', 'Install.ps1', 'src\Common.psm1', 'src\Providers.psm1', 'src\UpdateEngine.ps1', 'src\Gui.ps1', 'src\Gui.xaml', 'src\GuiModel.cs', 'src\Scheduler.psm1', 'src\Report.psm1', 'src\i18n.json', 'src\config.default.json', 'assets\icon.ico')) {
+            $p = Join-Path $x $r
+            if (-not (Test-Path $p -PathType Leaf) -or (Get-Item $p).Length -eq 0) { throw "Package incomplete: $r" }
+          }
+          if ((Get-Content (Join-Path $x 'VERSION') -Raw).Trim() -ne $version) { throw 'VERSION mismatch in package' }
+          $exp = ((Get-Content "$zip.sha256" -Raw).Trim() -split '\s+')[0]
+          if ($exp -ne (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()) { throw 'SHA-256 mismatch' }
+          Write-Host "Package OK: $zip"
 
       - name: Publish GitHub release
         if: github.event_name == 'workflow_dispatch' && inputs.build_type != 'check-only'
